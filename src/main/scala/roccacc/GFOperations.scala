@@ -190,6 +190,124 @@ is(AdderState.done) { // DONE
   }
 }
 
+class GFMul(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
+    val io = IO(new Bundle {
+    val in1 = Flipped(Decoupled(UInt((2 * fieldSize).W)))
+    val in2 = Flipped(Decoupled(UInt((2 * fieldSize).W)))
+    val out = Valid(UInt(fieldSize.W))
+  })
+  object MulState extends ChiselEnum {
+    val idle, reduction, accumulation, r_reduction, done = Value
+  }
+  val mul_state = RegInit(MulState.idle)
+  val mul_result = RegInit(0.U((fieldSize).W))
+  val reducer1_done = RegInit(false.B)
+  val reducer2_done = RegInit(false.B)
+  val reducer1_sent = RegInit(false.B)
+  val reducer2_sent = RegInit(false.B)
+  val reducer3_sent = RegInit(false.B)
+  val reduced1 = RegInit(0.U((2 * fieldSize).W))
+  val reduced2 = RegInit(0.U((2 * fieldSize).W))
+  io.in1.ready := mul_state === MulState.idle
+  io.in2.ready := mul_state === MulState.idle
+  io.out.bits := 0.U((fieldSize).W)
+  io.out.valid := false.B
+  val reducer1 = Module(new GFReduce(fieldSize))
+  val reducer2 = Module(new GFReduce(fieldSize))
+  val reducer3 = Module(new GFReduce(fieldSize))
+  reducer1.io.in1.bits := 0.U((2 * fieldSize).W)
+  reducer1.io.in1.valid := false.B
+  reducer2.io.in1.bits := 0.U((2 * fieldSize).W)
+  reducer2.io.in1.valid := false.B
+  reducer3.io.in1.bits := 0.U((2 * fieldSize).W)
+  reducer3.io.in1.valid := false.B
+  val acccount = RegInit(0.U((log2Ceil(fieldSize)+1).W))
+  //Should do log2(fieldSize) instead of fieldSize
+  val accval = RegInit(0.U((2 * fieldSize).W))
+
+  switch(mul_state) {
+  is(MulState.idle) { // IDLE
+    printf("(Multiplication) in idle state, waiting for inputs\n")
+    reducer1_sent := false.B
+    reducer2_sent := false.B
+    reducer1_done := false.B
+    reducer2_done := false.B
+    reducer3_sent := false.B
+    mul_result := 0.U((fieldSize).W)
+    io.out.valid := false.B
+    io.out.bits := 0.U((fieldSize).W)
+    acccount := 0.U((log2Ceil(fieldSize)+1).W)
+    when(io.in1.valid && io.in2.valid) {
+      mul_state := MulState.reduction
+    }
+  }
+is(MulState.reduction) { // REDUCTION
+    printf("(Multiplication) in reduction state\n")
+    when(!reducer1_sent) {
+  reducer1.io.in1.bits := io.in1.bits
+    reducer1.io.in1.valid := true.B
+    reducer1_sent := true.B
+  }
+  when(!reducer2_sent) {
+    reducer2.io.in1.bits := io.in2.bits
+    reducer2.io.in1.valid := true.B
+    reducer2_sent := true.B
+  }
+  when(reducer1.io.out.valid) {
+    printf("(Multiplication)reducer1 done, returning %b\n", reducer1.io.out.bits)
+    reduced1 := reducer1.io.out.bits
+    reducer1_done := true.B
+    reducer1.io.in1.valid := false.B
+  }
+  when(reducer2.io.out.valid) {
+    printf("(Multiplication)reducer2 done, returning %b\n", reducer2.io.out.bits)
+    reduced2 := reducer2.io.out.bits
+    reducer2_done := true.B
+    reducer2.io.in1.valid := false.B
+  }
+    when(reducer1_done && reducer2_done) {
+        printf("(Multiplication) reducers done, multiplying %b and %b\n", reduced1, reduced2)
+        reducer1.io.in1.valid := false.B
+        reducer2.io.in1.valid := false.B
+        mul_state := MulState.accumulation
+    }
+}
+is(MulState.accumulation) {
+  printf("(Multiplication) in accumulation state\n")
+  when(acccount < fieldSize.U){
+    printf("(Multiplication) acccount %d, accval %b\n", acccount, accval)
+      accval := Mux(reduced2(acccount), accval ^ reduced1 << acccount, accval)
+      acccount := acccount + 1.U
+  }.otherwise{
+    mul_state := MulState.r_reduction
+  }
+}
+is(MulState.r_reduction){
+   when(!reducer3_sent) {
+    reducer3.io.in1.bits := accval
+    reducer3.io.in1.valid := true.B
+    reducer3_sent := true.B
+  }
+  when(reducer3.io.out.valid) {
+    printf("(Multiplication)reducer3 done, returning %b\n", reducer3.io.out.bits)
+    mul_result := reducer3.io.out.bits
+    reducer3.io.in1.valid := false.B
+    mul_state := MulState.done
+  }
+}
+is(MulState.done) { // DONE
+    printf("(Multiplication) done, returning %b\n", mul_result)
+    reducer1.io.in1.bits := 0.U((2 * fieldSize).W)
+    reducer2.io.in1.bits := 0.U((2 * fieldSize).W)
+    io.out.valid := true.B
+    io.out.bits := mul_result
+    mul_state := MulState.idle
+    reduced1 := 0.U((2 * fieldSize).W)
+    reduced2 := 0.U((2 * fieldSize).W)
+    accval := 0.U((2 * fieldSize).W)
+    }
+  }
+}
 
 /** Implementation of Galois Field Operations
   * 
