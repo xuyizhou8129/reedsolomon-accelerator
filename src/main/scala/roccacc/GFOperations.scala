@@ -208,6 +208,8 @@ class GFMul(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
   val reducer3_sent = RegInit(false.B)
   val reduced1 = RegInit(0.U((2 * fieldSize).W))
   val reduced2 = RegInit(0.U((2 * fieldSize).W))
+  val storedinput1 = RegInit(0.U((2 * fieldSize).W))
+  val storedinput2 = RegInit(0.U((2 * fieldSize).W))
   io.in1.ready := mul_state === MulState.idle
   io.in2.ready := mul_state === MulState.idle
   io.out.bits := 0.U((fieldSize).W)
@@ -238,18 +240,20 @@ class GFMul(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
     io.out.bits := 0.U((fieldSize).W)
     acccount := 0.U((log2Ceil(fieldSize)+1).W)
     when(io.in1.valid && io.in2.valid) {
+      storedinput1 := io.in1.bits
+      storedinput2 := io.in2.bits
       mul_state := MulState.reduction
     }
   }
 is(MulState.reduction) { // REDUCTION
     printf("(Multiplication) in reduction state\n")
     when(!reducer1_sent) {
-  reducer1.io.in1.bits := io.in1.bits
+  reducer1.io.in1.bits := storedinput1
     reducer1.io.in1.valid := true.B
     reducer1_sent := true.B
   }
   when(!reducer2_sent) {
-    reducer2.io.in1.bits := io.in2.bits
+    reducer2.io.in1.bits := storedinput2
     reducer2.io.in1.valid := true.B
     reducer2_sent := true.B
   }
@@ -305,6 +309,88 @@ is(MulState.done) { // DONE
     reduced1 := 0.U((2 * fieldSize).W)
     reduced2 := 0.U((2 * fieldSize).W)
     accval := 0.U((2 * fieldSize).W)
+    storedinput1 := 0.U((2 * fieldSize).W)
+    storedinput2 := 0.U((2 * fieldSize).W)
+    }
+  }
+}
+
+class GFPower(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
+    val io = IO(new Bundle {
+    val in1 = Flipped(Decoupled(UInt((2 * fieldSize).W)))
+    val in2 = Flipped(Decoupled(UInt((2 * fieldSize).W)))
+    val out = Valid(UInt(fieldSize.W))
+  })
+  object PowerState extends ChiselEnum {
+    val idle, computing, done = Value
+  }
+  val power_state = RegInit(PowerState.idle)
+  val power_result = RegInit(0.U((fieldSize).W))
+  val load_inputs_done = RegInit(false.B)
+  val acc_val = RegInit(1.U((fieldSize).W))
+  val acc_count = RegInit(0.U((2 * fieldSize).W))
+  io.in1.ready := power_state === PowerState.idle
+  io.in2.ready := power_state === PowerState.idle
+  io.out.bits := 0.U((fieldSize).W)
+  io.out.valid := false.B
+  val multiplier1 = Module(new GFMul(fieldSize))
+  multiplier1.io.in1.bits := 0.U((2 * fieldSize).W)
+  multiplier1.io.in1.valid := false.B
+  multiplier1.io.in2.bits := 0.U((2 * fieldSize).W)
+  multiplier1.io.in2.valid := false.B
+
+  switch(power_state) {
+  is(PowerState.idle) { // IDLE
+    printf("(Power) in idle state, waiting for inputs\n")
+    load_inputs_done := false.B
+    power_result := 0.U((fieldSize).W)
+    io.out.valid := false.B
+    io.out.bits := 0.U((fieldSize).W)
+    when(io.in1.valid && io.in2.valid) {
+      power_state := PowerState.computing
+    }
+  }
+  is(PowerState.computing) { // COMPUTING
+    printf("(Power) in computing state\n")
+    printf("(Power) acc_val %b, acc_count %d\n", acc_val, acc_count)
+    when(!load_inputs_done && multiplier1.io.in1.ready && multiplier1.io.in2.ready) {
+      printf("(Power) loading inputs\n")
+      multiplier1.io.in1.bits := io.in1.bits
+      multiplier1.io.in1.valid := true.B
+      multiplier1.io.in2.bits := io.in1.bits
+      multiplier1.io.in2.valid := true.B
+      load_inputs_done := true.B
+      acc_val := 1.U((fieldSize).W)
+      acc_count := 2.U((2 * fieldSize).W)
+    }
+    .elsewhen(load_inputs_done && multiplier1.io.in1.ready && multiplier1.io.in2.ready){
+      when(multiplier1.io.in1.ready && multiplier1.io.in2.ready) {
+        multiplier1.io.in1.bits := io.in1.bits
+        multiplier1.io.in1.valid := true.B
+        multiplier1.io.in2.bits := acc_val
+        multiplier1.io.in2.valid := true.B
+      }
+    }
+    when(acc_count < io.in2.bits && multiplier1.io.out.valid){
+      acc_val := multiplier1.io.out.bits
+      acc_count := acc_count + 1.U
+    }
+    .elsewhen(multiplier1.io.out.valid){
+      printf("(Power) multiplier done, returning %b\n", multiplier1.io.out.bits)
+      acc_val := multiplier1.io.out.bits
+      power_state := PowerState.done
+      multiplier1.io.in1.valid := false.B
+      multiplier1.io.in2.valid := false.B
+    }
+  }
+  is(PowerState.done) { // DONE
+      printf("(Power) done, returning %b\n", acc_val)
+      io.out.valid := true.B
+      io.out.bits := acc_val
+      power_state := PowerState.idle
+      acc_val := 0.U((fieldSize).W)
+      acc_count := 0.U((2 * fieldSize).W)
+      load_inputs_done := false.B
     }
   }
 }
@@ -314,292 +400,292 @@ is(MulState.done) { // DONE
   * @param fieldSize The size of the Galois Field (e.g., 8 for GF(2^8))
   * @param p Implicit parameter passed by the build system
   */
-class GFOperations(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE)(implicit p: Parameters) extends CoreModule()(p) {
-  import GFOperations._
+// class GFOperations(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE)(implicit p: Parameters) extends CoreModule()(p) {
+//   import GFOperations._
   
-  val io = IO(new Bundle {
-    val fn = Input(Bits(SZ_GF_FN))           // Operation function code
-    val operand1 = Input(UInt((2 * fieldSize).W))  // First operand
-    val operand2 = Input(UInt((2 * fieldSize).W))  // Second operand (not used for inverse)
-    val result = Output(UInt((2 * fieldSize).W))  // Operation result
-    val valid = Output(Bool())               // Result valid signal
-  })
+//   val io = IO(new Bundle {
+//     val fn = Input(Bits(SZ_GF_FN))           // Operation function code
+//     val operand1 = Input(UInt((2 * fieldSize).W))  // First operand
+//     val operand2 = Input(UInt((2 * fieldSize).W))  // Second operand (not used for inverse)
+//     val result = Output(UInt((2 * fieldSize).W))  // Operation result
+//     val valid = Output(Bool())               // Result valid signal
+//   })
   
-  // Internal registers for state management
-  val result_valid = RegInit(false.B)
-  // Default outputs
-  io.result := 0.U(fieldSize.W)
-  io.valid := result_valid
+//   // Internal registers for state management
+//   val result_valid = RegInit(false.B)
+//   // Default outputs
+//   io.result := 0.U(fieldSize.W)
+//   io.valid := result_valid
   
-val reduce_state = RegInit(0.U(2.W))  // 0: IDLE, 1: COMPUTING, 2: DONE
-val reduce_temp_poly = RegInit(0.U((fieldSize * 2).W))
-val reduce_irreducible = RegInit(0.U((fieldSize + 1).W))
-val reduce_result = RegInit(0.U(fieldSize.W))
-val reduce_requested = RegInit(false.B)
+// val reduce_state = RegInit(0.U(2.W))  // 0: IDLE, 1: COMPUTING, 2: DONE
+// val reduce_temp_poly = RegInit(0.U((fieldSize * 2).W))
+// val reduce_irreducible = RegInit(0.U((fieldSize + 1).W))
+// val reduce_result = RegInit(0.U(fieldSize.W))
+// val reduce_requested = RegInit(false.B)
 
-  // GF Addition (XOR operation)
-  //*Todo: Implement the Valid Singal Properly
-  when(isAdd(io.fn)) {
-    io.result := gfAdd(io.operand1, io.operand2, fieldSize)
-    result_valid := true.B
-  }.elsewhen(isMul(io.fn)) {
-    // GF Multiplication using polynomial multiplication
-    io.result := gfMultiply(io.operand1, io.operand2, fieldSize)
-    result_valid := true.B
-  }.elsewhen(isDiv(io.fn)) {
-    // GF Division (multiply by inverse)
-    val inverse = gfInverse(io.operand2, fieldSize)
-    io.result := gfMultiply(io.operand1, inverse, fieldSize)
-    result_valid := true.B
-  }.elsewhen(isPow(io.fn)) {
-    // GF Exponentiation
-    io.result := gfPower(io.operand1, io.operand2, fieldSize)
-    result_valid := true.B
-  }.elsewhen(isInv(io.fn)) {
-    // GF Inverse
-    io.result := gfInverse(io.operand1, fieldSize)
-    result_valid := true.B
-  }.elsewhen(isRed(io.fn)) {
-    // GF Reduction
-    io.result := gfReduce(io.operand1, io.operand2, fieldSize)
-    result_valid := true.B
-  }.elsewhen(isGip(io.fn)) {
-    // GF Irreducible Polynomial
-    io.result := getIrreduciblePolynomial(fieldSize)
-    result_valid := true.B
-  }.otherwise {
-    // No valid operation - clear valid signal
-    result_valid := false.B
-  }
+//   // GF Addition (XOR operation)
+//   //*Todo: Implement the Valid Singal Properly
+//   when(isAdd(io.fn)) {
+//     io.result := gfAdd(io.operand1, io.operand2, fieldSize)
+//     result_valid := true.B
+//   }.elsewhen(isMul(io.fn)) {
+//     // GF Multiplication using polynomial multiplication
+//     io.result := gfMultiply(io.operand1, io.operand2, fieldSize)
+//     result_valid := true.B
+//   }.elsewhen(isDiv(io.fn)) {
+//     // GF Division (multiply by inverse)
+//     val inverse = gfInverse(io.operand2, fieldSize)
+//     io.result := gfMultiply(io.operand1, inverse, fieldSize)
+//     result_valid := true.B
+//   }.elsewhen(isPow(io.fn)) {
+//     // GF Exponentiation
+//     io.result := gfPower(io.operand1, io.operand2, fieldSize)
+//     result_valid := true.B
+//   }.elsewhen(isInv(io.fn)) {
+//     // GF Inverse
+//     io.result := gfInverse(io.operand1, fieldSize)
+//     result_valid := true.B
+//   }.elsewhen(isRed(io.fn)) {
+//     // GF Reduction
+//     io.result := gfReduce(io.operand1, io.operand2, fieldSize)
+//     result_valid := true.B
+//   }.elsewhen(isGip(io.fn)) {
+//     // GF Irreducible Polynomial
+//     io.result := getIrreduciblePolynomial(fieldSize)
+//     result_valid := true.B
+//   }.otherwise {
+//     // No valid operation - clear valid signal
+//     result_valid := false.B
+//   }
   
-  /** Galois Field multiplication using polynomial representation
-    * 
-    * @param a First operand
-    * @param b Second operand  
-    * @param fieldSize Size of the field
-    * @return Result of GF multiplication
-    */
-  def gfAdd(a: UInt, b: UInt, fieldSize: Int): UInt = {
-    val result = Wire(UInt(fieldSize.W))
-    // Reduce inputs first, then do GF addition (XOR)
-    val reducedA = gfReduce(a, getIrreduciblePolynomial(fieldSize), fieldSize)
-    val reducedB = gfReduce(b, getIrreduciblePolynomial(fieldSize), fieldSize)
-    result := reducedA ^ reducedB
-    result
-  }
+//   /** Galois Field multiplication using polynomial representation
+//     * 
+//     * @param a First operand
+//     * @param b Second operand  
+//     * @param fieldSize Size of the field
+//     * @return Result of GF multiplication
+//     */
+//   def gfAdd(a: UInt, b: UInt, fieldSize: Int): UInt = {
+//     val result = Wire(UInt(fieldSize.W))
+//     // Reduce inputs first, then do GF addition (XOR)
+//     val reducedA = gfReduce(a, getIrreduciblePolynomial(fieldSize), fieldSize)
+//     val reducedB = gfReduce(b, getIrreduciblePolynomial(fieldSize), fieldSize)
+//     result := reducedA ^ reducedB
+//     result
+//   }
 
-  def gfMultiply(a: UInt, b: UInt, fieldSize: Int): UInt = {
-    val result = Wire(UInt(fieldSize.W))
-    
-    // Handle zero case
-    when(a === 0.U || b === 0.U) {
-      result := 0.U
-    }.otherwise {
-      // Proper GF multiplication using unrolled polynomial multiplication
-      // Manually unroll the loop to avoid combinational cycles
-      //* Todo: Implement this properly without hard coding the number of terms
-      val term0 = Mux(b(0), a << 0.U, 0.U)
-      val term1 = Mux(b(1), a << 1.U, 0.U)
-      val term2 = Mux(b(2), a << 2.U, 0.U)
-      val term3 = Mux(b(3), a << 3.U, 0.U)
-      val term4 = Mux(b(4), a << 4.U, 0.U)
-      val term5 = Mux(b(5), a << 5.U, 0.U)
-      val term6 = Mux(b(6), a << 6.U, 0.U)
-      val term7 = Mux(b(7), a << 7.U, 0.U)
-      
-      val term0_reduced = gfReduce(term0, getIrreduciblePolynomial(fieldSize), fieldSize)
-      val term1_reduced = gfReduce(term1, getIrreduciblePolynomial(fieldSize), fieldSize)
-      val term2_reduced = gfReduce(term2, getIrreduciblePolynomial(fieldSize), fieldSize)
-      val term3_reduced = gfReduce(term3, getIrreduciblePolynomial(fieldSize), fieldSize)
-      val term4_reduced = gfReduce(term4, getIrreduciblePolynomial(fieldSize), fieldSize)
-      val term5_reduced = gfReduce(term5, getIrreduciblePolynomial(fieldSize), fieldSize)
-      val term6_reduced = gfReduce(term6, getIrreduciblePolynomial(fieldSize), fieldSize)
-      val term7_reduced = gfReduce(term7, getIrreduciblePolynomial(fieldSize), fieldSize)
-      // XOR all terms together
-      result := term0_reduced ^ term1_reduced ^ term2_reduced ^ term3_reduced ^ term4_reduced ^ term5_reduced ^ term6_reduced ^ term7_reduced
-      // val extendedTempResult = tempResult.zext(1) // Extend to 16 bits
-      // result := gfReduce(extendedTempResult, getIrreduciblePolynomial(fieldSize), fieldSize)
-      //* Todo: Implement this properly to check it there is a problem with the reduction
-    }
-    
-    result
-  }
-  
-  /** Galois Field inverse using Extended Euclidean Algorithm
-    * 
-    * @param a Element to find inverse of
-    * @param fieldSize Size of the field
-    * @return Inverse of a in GF(2^fieldSize)
-    */
-  def gfInverse(a: UInt, fieldSize: Int): UInt = {
-    val irreduciblePoly = getIrreduciblePolynomial(fieldSize)
-    
-    // Extended Euclidean Algorithm implementation
-    // This is a simplified version - in practice, you might want to use
-    // lookup tables or more efficient algorithms for larger fields
-    val result = Wire(UInt(fieldSize.W))
-    
-    // For now, return a simple implementation
-    // In a real implementation, you'd use the Extended Euclidean Algorithm
-    when(a === 0.U) {
-      result := 0.U  // No inverse for zero
-    }.otherwise {
-      result := gfPower(a, (fieldSize - 2).U, fieldSize)
-    }
-    result
-  }
-  
-  /** Galois Field exponentiation using state machine
-    * Simple approach: multiply base by itself 'exponent' times
-    * 
-    * @param base Base element
-    * @param exponent Exponent
-    * @param fieldSize Size of the field
-    * @return Result of base^exponent in GF(2^fieldSize)
-    */
-  def gfPower(base: UInt, exponent: UInt, fieldSize: Int): UInt = {
-    val result = Wire(UInt(fieldSize.W))
-    
-    // State machine registers
-    val state = RegInit(0.U(2.W))  // 0: IDLE, 1: COMPUTING, 2: DONE
-    val temp_result = RegInit(1.U(fieldSize.W))
-    val original_base = RegInit(0.U(fieldSize.W))
-    val temp_exp = RegInit(0.U(fieldSize.W))
-    
-    // Default outputs
-    result := temp_result
-    
-    // State machine
-    switch(state) {
-      is(0.U) { // IDLE state
-        // Initialize for new computation
-        temp_result := 1.U
-        original_base := base
-        temp_exp := exponent
-        state := 1.U
-      }
-      
-      is(1.U) { // COMPUTING state
-        // Check if we're done (exponent reached 0)
-        when(temp_exp === 0.U) {
-          state := 2.U
-        }.otherwise {
-          // Multiply result by original base once
-          temp_result := gfMultiply(temp_result, original_base, fieldSize)
-          // Reduce exponent by 1
-          temp_exp := temp_exp - 1.U
-        }
-      }
-      
-      is(2.U) { // DONE state
-        // Handle special cases and output result
-        when(exponent === 0.U) {
-          result := 1.U
-        }.elsewhen(base === 0.U) {
-          result := 0.U
-        }.otherwise {
-          result := temp_result
-        }
-        
-        // Stay in DONE state until new computation starts
-        // (This will be controlled by the calling logic)
-      }
-    }
-    
-    result
-  }
-  
-  /** Reduce polynomial modulo irreducible polynomial
-    * 
-    * This function iteratively reduces a polynomial by:
-    * 1. Finding the highest (most significant) non-zero bit position
-    * 2. If that bit position is outside the field (>= fieldSize), reducing it
-    *    by XORing with the irreducible polynomial shifted appropriately
-    * 3. Repeating until all bits are within the field size
-    * 
-    * Sequential implementation: finds MSB first, then reduces if needed
-    * 
-    * @param poly Polynomial to reduce
-    * @param irreduciblePoly Irreducible polynomial
-    * @param fieldSize Size of the field
-    * @return Reduced polynomial
-    */
- def gfReduce(poly: UInt, irreduciblePoly: UInt, fieldSize: Int): UInt = {
-  reduce_temp_poly := poly
-  reduce_irreducible := irreduciblePoly
-  reduce_requested := true.B  // Request reduction
-  
-  reduce_result  // Return current result (may be from previous operation)
-}
-
-switch(reduce_state) {
-  is(0.U) { // IDLE
-    when(reduce_requested) {
-      reduce_state := 1.U
-      reduce_requested := false.B
-    }
-  }
-  
-is(1.U) { // COMPUTING
-    when(reduce_temp_poly === 0.U) {
-        reduce_result := 0.U
-        reduce_state := 2.U
-    }.otherwise {
-        // Find the position of the highest set bit
-        val msb = PriorityEncoder(Reverse(reduce_temp_poly))
-        val polyWidth = (fieldSize * 2).U
-        val actualMsb = polyWidth - 1.U - msb  // Convert to actual MSB position
-        
-        when(actualMsb < fieldSize.U) {
-            // Already reduced
-            reduce_result := reduce_temp_poly(fieldSize - 1, 0)
-            reduce_state := 2.U
-        }.otherwise {
-            // Need to reduce
-            val shiftAmount = actualMsb - fieldSize.U
-            reduce_temp_poly := reduce_temp_poly ^ (reduce_irreducible << shiftAmount)
-            // Stay in COMPUTING
-        }
-    }
-}
-  
-  is(2.U) { // DONE
-    reduce_state := 0.U  // Return to IDLE
-  }
-}
- 
-//   def gfReduce(poly: UInt, irreduciblePoly: UInt, fieldSize: Int): UInt = {
+//   def gfMultiply(a: UInt, b: UInt, fieldSize: Int): UInt = {
 //     val result = Wire(UInt(fieldSize.W))
     
-//     // Combinational reduction - check each bit position
-//     val temp = Wire(Vec(fieldSize + 1, UInt((fieldSize * 2).W)))
-//     temp(0) := poly
-    
-//     for (i <- 0 until fieldSize) {
-//         val bitPos = (fieldSize * 2 - 1) - i
-//         when(temp(i)(bitPos)) {
-//             val shiftAmount = bitPos - fieldSize
-//             temp(i + 1) := temp(i) ^ (irreduciblePoly << shiftAmount)
-//         }.otherwise {
-//             temp(i + 1) := temp(i)
-//         }
+//     // Handle zero case
+//     when(a === 0.U || b === 0.U) {
+//       result := 0.U
+//     }.otherwise {
+//       // Proper GF multiplication using unrolled polynomial multiplication
+//       // Manually unroll the loop to avoid combinational cycles
+//       //* Todo: Implement this properly without hard coding the number of terms
+//       val term0 = Mux(b(0), a << 0.U, 0.U)
+//       val term1 = Mux(b(1), a << 1.U, 0.U)
+//       val term2 = Mux(b(2), a << 2.U, 0.U)
+//       val term3 = Mux(b(3), a << 3.U, 0.U)
+//       val term4 = Mux(b(4), a << 4.U, 0.U)
+//       val term5 = Mux(b(5), a << 5.U, 0.U)
+//       val term6 = Mux(b(6), a << 6.U, 0.U)
+//       val term7 = Mux(b(7), a << 7.U, 0.U)
+      
+//       val term0_reduced = gfReduce(term0, getIrreduciblePolynomial(fieldSize), fieldSize)
+//       val term1_reduced = gfReduce(term1, getIrreduciblePolynomial(fieldSize), fieldSize)
+//       val term2_reduced = gfReduce(term2, getIrreduciblePolynomial(fieldSize), fieldSize)
+//       val term3_reduced = gfReduce(term3, getIrreduciblePolynomial(fieldSize), fieldSize)
+//       val term4_reduced = gfReduce(term4, getIrreduciblePolynomial(fieldSize), fieldSize)
+//       val term5_reduced = gfReduce(term5, getIrreduciblePolynomial(fieldSize), fieldSize)
+//       val term6_reduced = gfReduce(term6, getIrreduciblePolynomial(fieldSize), fieldSize)
+//       val term7_reduced = gfReduce(term7, getIrreduciblePolynomial(fieldSize), fieldSize)
+//       // XOR all terms together
+//       result := term0_reduced ^ term1_reduced ^ term2_reduced ^ term3_reduced ^ term4_reduced ^ term5_reduced ^ term6_reduced ^ term7_reduced
+//       // val extendedTempResult = tempResult.zext(1) // Extend to 16 bits
+//       // result := gfReduce(extendedTempResult, getIrreduciblePolynomial(fieldSize), fieldSize)
+//       //* Todo: Implement this properly to check it there is a problem with the reduction
 //     }
     
-//     result := temp(fieldSize)(fieldSize - 1, 0)
 //     result
+//   }
+  
+//   /** Galois Field inverse using Extended Euclidean Algorithm
+//     * 
+//     * @param a Element to find inverse of
+//     * @param fieldSize Size of the field
+//     * @return Inverse of a in GF(2^fieldSize)
+//     */
+//   def gfInverse(a: UInt, fieldSize: Int): UInt = {
+//     val irreduciblePoly = getIrreduciblePolynomial(fieldSize)
+    
+//     // Extended Euclidean Algorithm implementation
+//     // This is a simplified version - in practice, you might want to use
+//     // lookup tables or more efficient algorithms for larger fields
+//     val result = Wire(UInt(fieldSize.W))
+    
+//     // For now, return a simple implementation
+//     // In a real implementation, you'd use the Extended Euclidean Algorithm
+//     when(a === 0.U) {
+//       result := 0.U  // No inverse for zero
+//     }.otherwise {
+//       result := gfPower(a, (fieldSize - 2).U, fieldSize)
+//     }
+//     result
+//   }
+  
+//   /** Galois Field exponentiation using state machine
+//     * Simple approach: multiply base by itself 'exponent' times
+//     * 
+//     * @param base Base element
+//     * @param exponent Exponent
+//     * @param fieldSize Size of the field
+//     * @return Result of base^exponent in GF(2^fieldSize)
+//     */
+//   def gfPower(base: UInt, exponent: UInt, fieldSize: Int): UInt = {
+//     val result = Wire(UInt(fieldSize.W))
+    
+//     // State machine registers
+//     val state = RegInit(0.U(2.W))  // 0: IDLE, 1: COMPUTING, 2: DONE
+//     val temp_result = RegInit(1.U(fieldSize.W))
+//     val original_base = RegInit(0.U(fieldSize.W))
+//     val temp_exp = RegInit(0.U(fieldSize.W))
+    
+//     // Default outputs
+//     result := temp_result
+    
+//     // State machine
+//     switch(state) {
+//       is(0.U) { // IDLE state
+//         // Initialize for new computation
+//         temp_result := 1.U
+//         original_base := base
+//         temp_exp := exponent
+//         state := 1.U
+//       }
+      
+//       is(1.U) { // COMPUTING state
+//         // Check if we're done (exponent reached 0)
+//         when(temp_exp === 0.U) {
+//           state := 2.U
+//         }.otherwise {
+//           // Multiply result by original base once
+//           temp_result := gfMultiply(temp_result, original_base, fieldSize)
+//           // Reduce exponent by 1
+//           temp_exp := temp_exp - 1.U
+//         }
+//       }
+      
+//       is(2.U) { // DONE state
+//         // Handle special cases and output result
+//         when(exponent === 0.U) {
+//           result := 1.U
+//         }.elsewhen(base === 0.U) {
+//           result := 0.U
+//         }.otherwise {
+//           result := temp_result
+//         }
+        
+//         // Stay in DONE state until new computation starts
+//         // (This will be controlled by the calling logic)
+//       }
+//     }
+    
+//     result
+//   }
+  
+//   /** Reduce polynomial modulo irreducible polynomial
+//     * 
+//     * This function iteratively reduces a polynomial by:
+//     * 1. Finding the highest (most significant) non-zero bit position
+//     * 2. If that bit position is outside the field (>= fieldSize), reducing it
+//     *    by XORing with the irreducible polynomial shifted appropriately
+//     * 3. Repeating until all bits are within the field size
+//     * 
+//     * Sequential implementation: finds MSB first, then reduces if needed
+//     * 
+//     * @param poly Polynomial to reduce
+//     * @param irreduciblePoly Irreducible polynomial
+//     * @param fieldSize Size of the field
+//     * @return Reduced polynomial
+//     */
+//  def gfReduce(poly: UInt, irreduciblePoly: UInt, fieldSize: Int): UInt = {
+//   reduce_temp_poly := poly
+//   reduce_irreducible := irreduciblePoly
+//   reduce_requested := true.B  // Request reduction
+  
+//   reduce_result  // Return current result (may be from previous operation)
 // }
-  /** Get irreducible polynomial for given field size
-    * 
-    * @param fieldSize Size of the field
-    * @return Irreducible polynomial
-    */
-  def getIrreduciblePolynomial(fieldSize: Int): UInt = {
-    fieldSize match {
-      case 8 => "b100011101".U  // x^8 + x^4 + x^3 + x^2 + 1
-      case 16 => "b10000000000011011".U  // x^16 + x^5 + x^3 + x + 1
-      case 32 => "b100000000000000000000000000101101".U  // x^32 + x^7 + x^3 + x^2 + 1
-      case _ => "b100011101".U  // Default to GF(2^8) polynomial
-    }
-  }
-}
+
+// switch(reduce_state) {
+//   is(0.U) { // IDLE
+//     when(reduce_requested) {
+//       reduce_state := 1.U
+//       reduce_requested := false.B
+//     }
+//   }
+  
+// is(1.U) { // COMPUTING
+//     when(reduce_temp_poly === 0.U) {
+//         reduce_result := 0.U
+//         reduce_state := 2.U
+//     }.otherwise {
+//         // Find the position of the highest set bit
+//         val msb = PriorityEncoder(Reverse(reduce_temp_poly))
+//         val polyWidth = (fieldSize * 2).U
+//         val actualMsb = polyWidth - 1.U - msb  // Convert to actual MSB position
+        
+//         when(actualMsb < fieldSize.U) {
+//             // Already reduced
+//             reduce_result := reduce_temp_poly(fieldSize - 1, 0)
+//             reduce_state := 2.U
+//         }.otherwise {
+//             // Need to reduce
+//             val shiftAmount = actualMsb - fieldSize.U
+//             reduce_temp_poly := reduce_temp_poly ^ (reduce_irreducible << shiftAmount)
+//             // Stay in COMPUTING
+//         }
+//     }
+// }
+  
+//   is(2.U) { // DONE
+//     reduce_state := 0.U  // Return to IDLE
+//   }
+// }
+ 
+// //   def gfReduce(poly: UInt, irreduciblePoly: UInt, fieldSize: Int): UInt = {
+// //     val result = Wire(UInt(fieldSize.W))
+    
+// //     // Combinational reduction - check each bit position
+// //     val temp = Wire(Vec(fieldSize + 1, UInt((fieldSize * 2).W)))
+// //     temp(0) := poly
+    
+// //     for (i <- 0 until fieldSize) {
+// //         val bitPos = (fieldSize * 2 - 1) - i
+// //         when(temp(i)(bitPos)) {
+// //             val shiftAmount = bitPos - fieldSize
+// //             temp(i + 1) := temp(i) ^ (irreduciblePoly << shiftAmount)
+// //         }.otherwise {
+// //             temp(i + 1) := temp(i)
+// //         }
+// //     }
+    
+// //     result := temp(fieldSize)(fieldSize - 1, 0)
+// //     result
+// // }
+//   /** Get irreducible polynomial for given field size
+//     * 
+//     * @param fieldSize Size of the field
+//     * @return Irreducible polynomial
+//     */
+//   def getIrreduciblePolynomial(fieldSize: Int): UInt = {
+//     fieldSize match {
+//       case 8 => "b100011101".U  // x^8 + x^4 + x^3 + x^2 + 1
+//       case 16 => "b10000000000011011".U  // x^16 + x^5 + x^3 + x + 1
+//       case 32 => "b100000000000000000000000000101101".U  // x^32 + x^7 + x^3 + x^2 + 1
+//       case _ => "b100011101".U  // Default to GF(2^8) polynomial
+//     }
+//   }
+// }
 
