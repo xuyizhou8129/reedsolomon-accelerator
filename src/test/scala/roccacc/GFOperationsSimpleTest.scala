@@ -33,7 +33,7 @@ class GFOperationsSimpleTest extends AnyFunSpec with ParallelTestExecution {
   describe("GFOperations Module") {
 
     it("performs GF Reduction") {
-      simulate(new GFReduce(fieldSize), buildDir = "build", enableWaves = true) { dut =>
+      simulate(new GFReduce(fieldSize), buildDir = "build", enableWaves = true, testName = Some("performs_GF_Reduction")) { dut =>
       // Reduction of 100011101
         dut.io.in1.valid.poke(true.B)              
         dut.io.in1.bits.poke("b100011101".U) 
@@ -59,7 +59,7 @@ class GFOperationsSimpleTest extends AnyFunSpec with ParallelTestExecution {
     }
 
     it("performs GF Addition") {
-      simulate(new GFAdd(fieldSize), buildDir = "build", enableWaves = true) { dut =>
+      simulate(new GFAdd(fieldSize), buildDir = "build", enableWaves = true, testName = Some("performs_GF_Addition")) { dut =>
         // Addition of 100011101 and 100011101
         dut.io.in1.valid.poke(true.B)
         dut.io.in2.valid.poke(true.B)
@@ -104,7 +104,7 @@ class GFOperationsSimpleTest extends AnyFunSpec with ParallelTestExecution {
     }
 
      it("performs GF Multiplication") {
-      simulate(new GFMul(fieldSize), buildDir = "build", enableWaves = true) { dut =>
+      simulate(new GFMul(fieldSize), buildDir = "build", enableWaves = true, testName = Some("performs_GF_Multiplication")) { dut =>
         // Multiplication of 1100011101 and 1001011101
         dut.io.in1.valid.poke(true.B)
         dut.io.in2.valid.poke(true.B)
@@ -132,7 +132,7 @@ class GFOperationsSimpleTest extends AnyFunSpec with ParallelTestExecution {
     }
    it("performs GF Power") {
       //simulate(new GFPower(fieldSize)) { dut =>
-      simulate(new GFPower(fieldSize), buildDir = "build", enableWaves = true) { dut =>
+      simulate(new GFPower(fieldSize), buildDir = "build", enableWaves = true, testName = Some("performs_GF_Power")) { dut =>
         // 1100011101^2
         dut.io.in1.valid.poke(true.B)
         dut.io.in2.valid.poke(true.B)
