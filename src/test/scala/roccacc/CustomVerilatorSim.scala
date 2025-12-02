@@ -41,20 +41,6 @@ object CustomVerilatorSim extends PeekPokeAPI {
         settings
       }
     }
-
-  //   def cleanup(): Unit = {
-  //       val tmpDir = os.Path(workspacePath)
-  //       val workDir = os.pwd / os.RelPath(workspacePath)
-
-  //       if (os.exists(workDir)) { os.remove.all(workDir) }
-  //       os.move(tmpDir, workDir, replaceExisting = true, createFolders = true, atomicMove = true)
-  //   }
-  // }
-
- def cleanup(): Unit = {
-    // Files are already in the build directory, so no cleanup needed
-    // Artifacts will remain accessible in the build directory
-  }
   }
   private def makeSimulator(
       buildDir: String,
