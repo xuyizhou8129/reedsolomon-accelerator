@@ -21,7 +21,7 @@ object CustomVerilatorSim extends PeekPokeAPI {
       }
       .result
 
-      simulator.cleanup()
+      //simulator.cleanup()
   }
 
   private class DefaultSimulator(

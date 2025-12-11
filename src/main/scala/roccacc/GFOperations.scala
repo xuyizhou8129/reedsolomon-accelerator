@@ -329,6 +329,8 @@ class GFPower(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
   val load_inputs_done = RegInit(false.B)
   val acc_val = RegInit(1.U((fieldSize).W))
   val acc_count = RegInit(0.U((2 * fieldSize).W))
+  val storedinput1 = RegInit(0.U((2 * fieldSize).W))
+  val storedinput2 = RegInit(0.U((2 * fieldSize).W))
   io.in1.ready := power_state === PowerState.idle
   io.in2.ready := power_state === PowerState.idle
   io.out.bits := 0.U((fieldSize).W)
@@ -348,16 +350,18 @@ class GFPower(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
     io.out.bits := 0.U((fieldSize).W)
     when(io.in1.valid && io.in2.valid) {
       power_state := PowerState.computing
+      storedinput1 := io.in1.bits
+      storedinput2 := io.in2.bits
     }
   }
   is(PowerState.computing) { // COMPUTING
-    printf("(Power) in computing state\n")
+    printf("(Power) in computing state, %b to the power of %b\n", storedinput1, storedinput2)
     printf("(Power) acc_val %b, acc_count %d\n", acc_val, acc_count)
     when(!load_inputs_done && multiplier1.io.in1.ready && multiplier1.io.in2.ready) {
       printf("(Power) loading inputs\n")
-      multiplier1.io.in1.bits := io.in1.bits
+      multiplier1.io.in1.bits := storedinput1
       multiplier1.io.in1.valid := true.B
-      multiplier1.io.in2.bits := io.in1.bits
+      multiplier1.io.in2.bits := storedinput1
       multiplier1.io.in2.valid := true.B
       load_inputs_done := true.B
       acc_val := 1.U((fieldSize).W)
@@ -365,13 +369,13 @@ class GFPower(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
     }
     .elsewhen(load_inputs_done && multiplier1.io.in1.ready && multiplier1.io.in2.ready){
       when(multiplier1.io.in1.ready && multiplier1.io.in2.ready) {
-        multiplier1.io.in1.bits := io.in1.bits
+        multiplier1.io.in1.bits := storedinput1
         multiplier1.io.in1.valid := true.B
         multiplier1.io.in2.bits := acc_val
         multiplier1.io.in2.valid := true.B
       }
     }
-    when(acc_count < io.in2.bits && multiplier1.io.out.valid){
+    when(acc_count < storedinput2 && multiplier1.io.out.valid){
       acc_val := multiplier1.io.out.bits
       acc_count := acc_count + 1.U
     }
@@ -391,10 +395,97 @@ class GFPower(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
       acc_val := 0.U((fieldSize).W)
       acc_count := 0.U((2 * fieldSize).W)
       load_inputs_done := false.B
+      storedinput1 := 0.U((2 * fieldSize).W)
+      storedinput2 := 0.U((2 * fieldSize).W)
     }
   }
 }
 
+class GFDiv(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
+    val io = IO(new Bundle {
+    val in1 = Flipped(Decoupled(UInt((2 * fieldSize).W)))
+    val in2 = Flipped(Decoupled(UInt((2 * fieldSize).W)))
+    val out = Valid(UInt(fieldSize.W))
+  })
+  object DivState extends ChiselEnum {
+    val idle, exponentiation, multiplication, done = Value
+  }
+  val div_state = RegInit(DivState.idle)
+  val inv_result = RegInit(0.U((fieldSize).W))
+  val div_result = RegInit(0.U((fieldSize).W))
+  io.in1.ready := div_state === DivState.idle
+  io.in2.ready := div_state === DivState.idle
+  io.out.bits := 0.U((fieldSize).W)
+  io.out.valid := false.B
+  val multiplier1 = Module(new GFMul(fieldSize))
+  val exponentiator1 = Module(new GFPower(fieldSize))
+  val storedinput1 = RegInit(0.U((2 * fieldSize).W))
+  val storedinput2 = RegInit(0.U((2 * fieldSize).W))
+  multiplier1.io.in1.bits := 0.U((2 * fieldSize).W)
+  multiplier1.io.in1.valid := false.B
+  multiplier1.io.in2.bits := 0.U((2 * fieldSize).W)
+  multiplier1.io.in2.valid := false.B
+  exponentiator1.io.in1.bits := 0.U((2 * fieldSize).W)
+  exponentiator1.io.in1.valid := false.B
+  exponentiator1.io.in2.bits := 0.U((2 * fieldSize).W)
+  exponentiator1.io.in2.valid := false.B
+
+  switch(div_state) {
+  is(DivState.idle) { // IDLE
+    printf("(Div) in idle state, waiting for inputs\n")
+    div_result := 0.U((fieldSize).W)
+    io.out.valid := false.B
+    io.out.bits := 0.U((fieldSize).W)
+    when(io.in1.valid && io.in2.valid) {
+      div_state := DivState.exponentiation
+      storedinput1 := io.in1.bits
+      storedinput2 := io.in2.bits
+    }
+  }
+  is(DivState.exponentiation) { // EXPONENTIATION
+    printf("(Div) in exponentiation state, dividing %b by %b\n", storedinput1, storedinput2)
+    when(exponentiator1.io.in1.ready && exponentiator1.io.in2.ready) {
+      exponentiator1.io.in2.bits := ((BigInt(1) << fieldSize) - 2).U((2 * fieldSize).W)
+      exponentiator1.io.in2.valid := true.B
+      exponentiator1.io.in1.bits := storedinput2
+      exponentiator1.io.in1.valid := true.B
+    }
+    when(exponentiator1.io.out.valid) {
+      printf("(Div) exponentiation done, returning %b\n", exponentiator1.io.out.bits)
+      inv_result := exponentiator1.io.out.bits
+      exponentiator1.io.in1.valid := false.B
+      exponentiator1.io.in2.valid := false.B
+      div_state := DivState.multiplication
+    }
+  }
+  is(DivState.multiplication) { // MULTIPLICATION
+    printf("(Div) in multiplication state\n")
+    when(multiplier1.io.in1.ready && multiplier1.io.in2.ready) {
+      multiplier1.io.in1.bits := inv_result
+      multiplier1.io.in1.valid := true.B
+      multiplier1.io.in2.bits := storedinput1
+      multiplier1.io.in2.valid := true.B
+    }
+    when(multiplier1.io.out.valid) {
+      printf("(Div) multiplication done, returning %b\n", multiplier1.io.out.bits)
+      div_result := multiplier1.io.out.bits
+      multiplier1.io.in1.valid := false.B
+      multiplier1.io.in2.valid := false.B
+      div_state := DivState.done
+    }
+  }
+  is(DivState.done) { // DONE
+      printf("(Div) done, returning %b\n", div_result)
+      io.out.valid := true.B
+      io.out.bits := div_result
+      div_state := DivState.idle
+      inv_result := 0.U((fieldSize).W)
+      div_result := 0.U((fieldSize).W)
+      storedinput1 := 0.U((2 * fieldSize).W)
+      storedinput2 := 0.U((2 * fieldSize).W)
+    }
+  }
+}
 //   /** Get irreducible polynomial for given field size
 //     * 
 //     * @param fieldSize Size of the field
