@@ -130,6 +130,8 @@ class GFAdd(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
   reducer1.io.in1.valid := false.B
   reducer2.io.in1.bits := 0.U((2 * fieldSize).W)
   reducer2.io.in1.valid := false.B
+  val storedinput1 = RegInit(0.U((2 * fieldSize).W))
+  val storedinput2 = RegInit(0.U((2 * fieldSize).W))
 
   switch(adder_state) {
   is(AdderState.idle) { // IDLE
@@ -143,17 +145,19 @@ class GFAdd(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
     io.out.bits := 0.U((fieldSize).W)
     when(io.in1.valid && io.in2.valid) {
       adder_state := AdderState.computing
+      storedinput1 := io.in1.bits
+      storedinput2 := io.in2.bits
     }
   }
 is(AdderState.computing) { // COMPUTING
     printf("(Addition) in computing state, reducing inputs\n")
     when(!reducer1_sent) {
-  reducer1.io.in1.bits := io.in1.bits
+  reducer1.io.in1.bits := storedinput1
     reducer1.io.in1.valid := true.B
     reducer1_sent := true.B
   }
   when(!reducer2_sent) {
-    reducer2.io.in1.bits := io.in2.bits
+    reducer2.io.in1.bits := storedinput2
     reducer2.io.in1.valid := true.B
     reducer2_sent := true.B
   }

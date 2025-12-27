@@ -61,6 +61,7 @@ object CustomVerilatorSim extends PeekPokeAPI {
     
     // Add a short UUID suffix to ensure uniqueness for parallel test runs
     val uniqueId = UUID.randomUUID().toString.replace("-", "").take(6)
+    //val uniqueId = DateTime.now(timezone.UTC).toIso
     val workspacePath = Seq(buildDir, className, s"${namePart}_${uniqueId}").mkString("/")
     val workspaceDir = Paths.get(os.pwd.toString, workspacePath)
     // Ensure the workspace directory exists
