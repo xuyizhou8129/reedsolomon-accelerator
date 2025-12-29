@@ -71,7 +71,7 @@ class RSEncoderSimpleTest extends AnyFunSpec with ParallelTestExecution {
   // }
   describe("RS Decoder Module") {
     it("decodes RS(15,11) message") {
-      simulate(new RS_Decoder(fieldSize, n, k), buildDir = "build", enableWaves = true, testName = Some("decodes_RS_15_11_message")) { dut =>
+      simulate(new RS_Encoder(fieldSize, n, k), buildDir = "build", enableWaves = true, testName = Some("decodes_RS_15_11_message")) { dut =>
         // Create test message with k=11 coefficients (using regular Scala Seq, not VecInit)
         val testMessage = Seq(
           "b00000001".U,  // coefficient 0

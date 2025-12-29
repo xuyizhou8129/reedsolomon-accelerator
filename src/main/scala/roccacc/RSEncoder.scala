@@ -5,7 +5,7 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import freechips.rocketchip.tile.CoreModule
 
-object RS_Decoder {
+object RS_Encoder {
   val DEFAULT_N = 15  // codeword length
   val DEFAULT_K = 11  // message length
   val DEFAULT_FIELD_SIZE = 8
@@ -14,11 +14,11 @@ object RS_Decoder {
   val DEFAULT_GENERATOR_COEFFS = Seq(1, 246, 35, 206, 24)
 }
 
-class RS_Decoder(
+class RS_Encoder(
   fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE,
-  n: Int = RS_Decoder.DEFAULT_N,
-  k: Int = RS_Decoder.DEFAULT_K,
-  generatorCoeffs: Seq[Int] = RS_Decoder.DEFAULT_GENERATOR_COEFFS
+  n: Int = RS_Encoder.DEFAULT_N,
+  k: Int = RS_Encoder.DEFAULT_K,
+  generatorCoeffs: Seq[Int] = RS_Encoder.DEFAULT_GENERATOR_COEFFS
 ) extends Module {
   // Calculate error correction capability: t = (n - k) / 2
   require((n - k) % 2 == 0, "n - k must be even for RS codes")
@@ -30,19 +30,19 @@ class RS_Decoder(
     val message = Flipped(Decoupled(Vec(k, UInt(fieldSize.W))))
     val out = Valid(Vec(n, UInt(fieldSize.W)))
   })
-  object RS_DecoderState extends ChiselEnum {
+  object RS_EncoderState extends ChiselEnum {
     val idle, extended, find_coeffs, multiplying, deducting, done = Value
   }
 
   // RS Decoder specific registers
-  val rs_decoder_state = RegInit(RS_DecoderState.idle)
+  val RS_Encoder_state = RegInit(RS_EncoderState.idle)
   val messageReg = RegInit(VecInit(Seq.fill(k)(0.U(fieldSize.W))))
   val intermediateReg = RegInit(VecInit(Seq.fill(n)(0.U(fieldSize.W))))  // Size n to hold extended message
   val codewordReg = RegInit(VecInit(Seq.fill(n)(0.U(fieldSize.W))))
   val foundCoeffIndex = RegInit(0.U(log2Ceil(n).W))
   val divisionResult = RegInit(0.U(fieldSize.W))
   val findCoeffsDone = RegInit(false.B)
-  io.message.ready := rs_decoder_state === RS_DecoderState.idle
+  io.message.ready := RS_Encoder_state === RS_EncoderState.idle
   io.out.valid := false.B
   io.out.bits := VecInit(Seq.fill(n)(0.U(fieldSize.W)))
   val divider1 = Module(new GFDiv(fieldSize))
@@ -67,29 +67,29 @@ class RS_Decoder(
   // Store multiplied values for (n-k+1) generator coefficients (generator has degree n-k, so n-k+1 coefficients)
   val multipliedValues = RegInit(VecInit(Seq.fill(n-k+1)(0.U(fieldSize.W))))
   
-  switch(rs_decoder_state) {
-  is(RS_DecoderState.idle) { // IDLE
+  switch(RS_Encoder_state) {
+  is(RS_EncoderState.idle) { // IDLE
       when(io.message.valid) {
         for (i <- 0 until k) {
           messageReg(i) := io.message.bits(i)
         }
       mul_count := 0.U
-      rs_decoder_state := RS_DecoderState.extended
-      printf("(RS_Decoder) In idle state, received message coeffs")
+      RS_Encoder_state := RS_EncoderState.extended
+      printf("(RS_Encoder) In idle state, received message coeffs")
     }
   }
-  is(RS_DecoderState.extended) {
+  is(RS_EncoderState.extended) {
     val extender = Module(new RS_extender(fieldSize, n, k))
     extender.io.message := messageReg
     intermediateReg := extender.io.out
-    printf("(RS_Decoder) In extended state, extended message done")
+    printf("(RS_Encoder) In extended state, extended message done")
     // Reset find_coeffs state
     findCoeffsDone := false.B
     foundCoeffIndex := 0.U
     // Transition to next state immediately (extension is combinational)
-    rs_decoder_state := RS_DecoderState.find_coeffs
+    RS_Encoder_state := RS_EncoderState.find_coeffs
   }
-  is(RS_DecoderState.find_coeffs) { 
+  is(RS_EncoderState.find_coeffs) { 
     when(!findCoeffsDone) {
       // Build a vector of non-zero flags
       val nonZeroFlags = VecInit((0 until n).map(i => intermediateReg(i) =/= 0.U))
@@ -100,15 +100,15 @@ class RS_Decoder(
       when(hasNonZero) {
         foundCoeffIndex := firstNonZeroIdx
         val foundCoeff = intermediateReg(firstNonZeroIdx)
-        printf("(RS_Decoder) Found first non-zero coefficient at index %d: %b\n", firstNonZeroIdx, foundCoeff)
+        printf("(RS_Encoder) Found first non-zero coefficient at index %d: %b\n", firstNonZeroIdx, foundCoeff)
         when(firstNonZeroIdx >= k.U) {
           // Skip division, go directly to done
-          printf("(RS_Decoder) First non-zero at index %d is in last %d positions, skipping to done\n", firstNonZeroIdx, (n-k-1).U)
+          printf("(RS_Encoder) First non-zero at index %d is in last %d positions, skipping to done\n", firstNonZeroIdx, (n-k-1).U)
               for (i <- 0 until n) {
-      printf("(RS_Decoder) Output codeword coefficient[%d]: %b\n", i.U, intermediateReg(i))
+      printf("(RS_Encoder) Output codeword coefficient[%d]: %b\n", i.U, intermediateReg(i))
     }
           findCoeffsDone := true.B
-          rs_decoder_state := RS_DecoderState.done
+          RS_Encoder_state := RS_EncoderState.done
         }.otherwise {
           // Start division: divide found coefficient by first generator coefficient
           when(divider1.io.in1.ready && divider1.io.in2.ready) {
@@ -117,16 +117,16 @@ class RS_Decoder(
             divider1.io.in2.bits := generatorPolynomial(0)  // Zero-extend to (2*fieldSize).W
             divider1.io.in2.valid := true.B
             findCoeffsDone := false.B
-            printf("(RS_Decoder) Dividing %b by %b (first generator coeff)\n", foundCoeff, generatorPolynomial(0))
+            printf("(RS_Encoder) Dividing %b by %b (first generator coeff)\n", foundCoeff, generatorPolynomial(0))
           }
         }
     }.otherwise {
         // All coefficients are zero
-        printf("(RS_Decoder) All coefficients are zero\n")
+        printf("(RS_Encoder) All coefficients are zero\n")
         findCoeffsDone := true.B
-        rs_decoder_state := RS_DecoderState.done
+        RS_Encoder_state := RS_EncoderState.done
             for (i <- 0 until n) {
-              printf("(RS_Decoder) Output codeword coefficient[%d]: %b\n", i.U, 0.U)
+              printf("(RS_Encoder) Output codeword coefficient[%d]: %b\n", i.U, 0.U)
     }
       }
     }
@@ -137,15 +137,15 @@ class RS_Decoder(
         divider1.io.in1.valid := false.B
         divider1.io.in2.valid := false.B
         findCoeffsDone := true.B
-        printf("(RS_Decoder) Division result: %b\n", divisionResult)
+        printf("(RS_Encoder) Division result: %b\n", divisionResult)
         // Reset multiplying state
         mul_count := 0.U
         multiplyingDone := false.B
-        rs_decoder_state := RS_DecoderState.multiplying
+        RS_Encoder_state := RS_EncoderState.multiplying
       }
     }
   
-  is(RS_DecoderState.multiplying) { // MULTIPLYING
+  is(RS_EncoderState.multiplying) { // MULTIPLYING
     // Multiply each generator coefficient with division result
     // and store the results for later addition
     when(!multiplyingDone) {
@@ -157,7 +157,7 @@ class RS_Decoder(
           multiplier1.io.in1.valid := true.B
           multiplier1.io.in2.bits := divisionResult.pad(2 * fieldSize)
           multiplier1.io.in2.valid := true.B
-          printf("(RS_Decoder) Multiplying generator[%d]=%b by divisionResult=%b\n", 
+          printf("(RS_Encoder) Multiplying generator[%d]=%b by divisionResult=%b\n", 
                  mul_count, generatorPolynomial(mul_count), divisionResult)
         }
         
@@ -166,21 +166,21 @@ class RS_Decoder(
           multipliedValues(mul_count) := multiplier1.io.out.bits
           multiplier1.io.in1.valid := false.B
           multiplier1.io.in2.valid := false.B
-          printf("(RS_Decoder) Stored multiplied value[%d]: %b\n", mul_count, multiplier1.io.out.bits)
+          printf("(RS_Encoder) Stored multiplied value[%d]: %b\n", mul_count, multiplier1.io.out.bits)
           mul_count := mul_count + 1.U
         }
       }.otherwise {
         // All (n-k+1) multiplications complete
-        printf("(RS_Decoder) All multiplications complete, processed %d coefficients\n", (n-k+1).U)
+        printf("(RS_Encoder) All multiplications complete, processed %d coefficients\n", (n-k+1).U)
         multiplyingDone := true.B
         add_count := 0.U
         deductingDone := false.B
         // Transition to deducting state to perform GF additions
-        rs_decoder_state := RS_DecoderState.deducting
+        RS_Encoder_state := RS_EncoderState.deducting
       }
     }
   }
-  is(RS_DecoderState.deducting) { // DEDUCTING
+  is(RS_EncoderState.deducting) { // DEDUCTING
     // Use GFAdd to add each multiplied value to intermediateReg
     when(!deductingDone) {
       // Check if we've processed all (n-k+1) additions
@@ -193,7 +193,7 @@ class RS_Decoder(
             adder1.io.in1.valid := true.B
             adder1.io.in2.bits := multipliedValues(add_count).pad(2 * fieldSize)
             adder1.io.in2.valid := true.B
-            printf("(RS_Decoder) Adding intermediateReg[%d]=%b + multipliedValues[%d]=%b\n", 
+            printf("(RS_Encoder) Adding intermediateReg[%d]=%b + multipliedValues[%d]=%b\n", 
                    targetIdx, intermediateReg(targetIdx), add_count, multipliedValues(add_count))
           }
           
@@ -202,33 +202,33 @@ class RS_Decoder(
             intermediateReg(targetIdx) := adder1.io.out.bits
             adder1.io.in1.valid := false.B
             adder1.io.in2.valid := false.B
-            printf("(RS_Decoder) Deducted: intermediateReg[%d] = %b\n", targetIdx, adder1.io.out.bits)
+            printf("(RS_Encoder) Deducted: intermediateReg[%d] = %b\n", targetIdx, adder1.io.out.bits)
             add_count := add_count + 1.U
           }
         }.otherwise {
           // Target index out of bounds, skip this addition
-          printf("(RS_Decoder) Target index %d out of bounds, skipping\n", targetIdx)
+          printf("(RS_Encoder) Target index %d out of bounds, skipping\n", targetIdx)
           add_count := add_count + 1.U
         }
       }.otherwise {
         // All (n-k+1) additions complete
-        printf("(RS_Decoder) Deduction complete, processed %d additions\n", (n-k+1).U)
+        printf("(RS_Encoder) Deduction complete, processed %d additions\n", (n-k+1).U)
         deductingDone := true.B
         add_count := 0.U
         // Go back to find_coeffs to find next non-zero
         findCoeffsDone := false.B
-        rs_decoder_state := RS_DecoderState.find_coeffs
+        RS_Encoder_state := RS_EncoderState.find_coeffs
       }
     }
   }
-  is(RS_DecoderState.done) { // DONE
-    printf("(RS_Decoder) Done, returning %d codeword coefficients\n", n.U)
-    rs_decoder_state := RS_DecoderState.idle
+  is(RS_EncoderState.done) { // DONE
+    printf("(RS_Encoder) Done, returning %d codeword coefficients\n", n.U)
+    RS_Encoder_state := RS_EncoderState.idle
     io.out.valid := true.B
     // Output the n codeword coefficients
     for (i <- 0 until n) {
       io.out.bits(i) := intermediateReg(i)
-      printf("(RS_Decoder) Output codeword coefficient[%d]: %b\n", i.U, intermediateReg(i))
+      printf("(RS_Encoder) Output codeword coefficient[%d]: %b\n", i.U, intermediateReg(i))
     }
     }
   }
@@ -236,8 +236,8 @@ class RS_Decoder(
 
 class RS_extender(
   fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE,
-  n: Int = RS_Decoder.DEFAULT_N,
-  k: Int = RS_Decoder.DEFAULT_K,
+  n: Int = RS_Encoder.DEFAULT_N,
+  k: Int = RS_Encoder.DEFAULT_K,
 ) extends Module{
   val io = IO(new Bundle {
     val message = Input(Vec(k, UInt(fieldSize.W)))
