@@ -69,53 +69,54 @@ class RSEncoderSimpleTest extends AnyFunSpec with ParallelTestExecution {
   //     }
   //   }
   // }
-  describe("RS Decoder Module") {
-    it("decodes RS(15,11) message") {
-      simulate(new RS_Encoder(fieldSize, n, k), buildDir = "build", enableWaves = true, testName = Some("decodes_RS_15_11_message")) { dut =>
-        // Create test message with k=11 coefficients (using regular Scala Seq, not VecInit)
-        val testMessage = Seq(
-          "b00000001".U,  // coefficient 0
-          "b00000010".U,  // coefficient 1
-          "b00000011".U,  // coefficient 2
-          "b00000100".U,  // coefficient 3
-          "b00000101".U,  // coefficient 4
-          "b00000110".U,  // coefficient 5
-          "b00000111".U,  // coefficient 6
-          "b00001000".U,  // coefficient 7
-          "b00001001".U,  // coefficient 8
-          "b00001010".U,  // coefficient 9
-          "b00001011".U   // coefficient 10
-        )
+  
+
+  describe("HW Encoding tested against SWModel") {
+    it("encodes RS(15,11) message and compares HW result with SW golden model") {
+      // Create test message with k=11 coefficients
+      val testMessage = (2 to 12).map(BigInt(_))
+      
+      // Step 1: Get software (golden) result
+      val swCodeword = SWModel.encode(testMessage, n, k, fieldSize)
+      
+      // Verify software codeword length is n=15
+      assert(swCodeword.length == n, s"Expected codeword length $n, got ${swCodeword.length}")
+      
+      // Print software results for debugging
+      println(s"Message: ${testMessage.mkString(", ")}")
+      println(s"SW Codeword: ${swCodeword.mkString(", ")}")
+      
+      // Step 2: Test hardware encoder
+      simulate(new RS_Encoder(fieldSize, n, k), buildDir = "build", enableWaves = true, testName = Some("hw_vs_sw_encoding")) { dut =>
+        // Convert test message to Chisel UInt format
+        val testMessageUInt = testMessage.map(_.U(fieldSize.W))
         
-        // Provide message input
+        // Provide message input to hardware
         for (i <- 0 until k) {
-          dut.io.message.bits(i).poke(testMessage(i))
+          dut.io.message.bits(i).poke(testMessageUInt(i))
         }
         dut.io.message.valid.poke(true.B)
         
-        // Wait for processing to complete (Int.MaxValue = effectively unlimited)
+        // Wait for processing to complete
         dut.clock.stepUntil(dut.io.out.valid, 1, Int.MaxValue)
         
         // Check output validity
         dut.io.out.valid.expect(true.B)
+        
+        // Step 3: Compare hardware result with software (golden) result
+        println(s"HW Codeword: ")
+        for (i <- 0 until n) {
+          val hwValue = dut.io.out.bits(i).peek().litValue
+          val swValue = swCodeword(i)
+          println(s"  [${i}]: HW=${hwValue}, SW=${swValue}")
+          
+          // Assert hardware result equals software result
+          assert(hwValue == swValue, 
+            s"Mismatch at index $i: HW=${hwValue}, SW=${swValue}")
+        }
+        
+        println("Success: Hardware encoding matches software (golden) model!")
       }
-    }
-  }
-  
-  describe("SWModel Encoding") {
-    it("encodes RS(15,11) message using SWModel") {
-      // Create test message with k=11 coefficients
-      val testMessage = (1 to 11).map(BigInt(_))
-      
-      // Call SWModel.encode
-      val codeword = SWModel.encode(testMessage)
-      
-      // Verify codeword length is n=15
-      assert(codeword.length == n, s"Expected codeword length $n, got ${codeword.length}")
-      
-      // Print results for debugging
-      println(s"Message: ${testMessage.mkString(", ")}")
-      println(s"Codeword: ${codeword.mkString(", ")}")
     }
   }
 }
