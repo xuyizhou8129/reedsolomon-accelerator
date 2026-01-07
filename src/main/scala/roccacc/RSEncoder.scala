@@ -66,14 +66,17 @@ class RS_Encoder(
   val deductingDone = RegInit(false.B)
   // Store multiplied values for (n-k+1) generator coefficients (generator has degree n-k, so n-k+1 coefficients)
   val multipliedValues = RegInit(VecInit(Seq.fill(n-k+1)(0.U(fieldSize.W))))
-  
+  val writingDone = RegInit(false.B)
+
   switch(RS_Encoder_state) {
   is(RS_EncoderState.idle) { // IDLE
       when(io.message.valid) {
         for (i <- 0 until k) {
           messageReg(i) := io.message.bits(i)
+          printf("(RS_Encoder) Loaded messageReg[%d]: %b\n", i.U, io.message.bits(i))
         }
       mul_count := 0.U
+      writingDone := false.B
       RS_Encoder_state := RS_EncoderState.extended
       printf("(RS_Encoder) In idle state, received message coeffs")
     }
@@ -109,6 +112,14 @@ class RS_Encoder(
     }
           findCoeffsDone := true.B
           RS_Encoder_state := RS_EncoderState.done
+
+
+
+          for{i <- 0 until k} {
+            printf("Line 117:(RS_Encoder) Output message coefficient[%d]: %b\n", i.U, messageReg(i))
+          }
+
+          
         }.otherwise {
           // Start division: divide found coefficient by first generator coefficient
           when(divider1.io.in1.ready && divider1.io.in2.ready) {
@@ -223,12 +234,20 @@ class RS_Encoder(
   }
   is(RS_EncoderState.done) { // DONE
     printf("(RS_Encoder) Done, returning %d codeword coefficients\n", n.U)
-    RS_Encoder_state := RS_EncoderState.idle
-    io.out.valid := true.B
-    // Output the n codeword coefficients
-    for (i <- 0 until n) {
+    when(!writingDone) {
+      for (i <- 0 until k) {
+    io.out.bits(i) := messageReg(i)
+    printf("(RS_Encoder) Output codeword coefficient[%d]: %b\n", i.U, messageReg(i))
+  }
+    for (i <- k until n) {
       io.out.bits(i) := intermediateReg(i)
       printf("(RS_Encoder) Output codeword coefficient[%d]: %b\n", i.U, intermediateReg(i))
+  }
+    writingDone := true.B
+    io.out.valid := true.B
+    }
+    .otherwise {
+      RS_Encoder_state := RS_EncoderState.idle
     }
     }
   }

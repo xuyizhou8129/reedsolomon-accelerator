@@ -1,7 +1,8 @@
 package roccacc
 import java.nio.file.Files
 import java.nio.file.Paths
-import java.util.UUID
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import chisel3._
 import chisel3.simulator.{PeekPokeAPI, SingleBackendSimulator}
 import svsim.{CommonCompilationSettings, verilator}
@@ -59,9 +60,9 @@ object CustomVerilatorSim extends PeekPokeAPI {
         "test"
     }
     
-    // Add a short UUID suffix to ensure uniqueness for parallel test runs
-    val uniqueId = UUID.randomUUID().toString.replace("-", "").take(6)
-    //val uniqueId = DateTime.now(timezone.UTC).toIso
+    // Add a date/time suffix to ensure uniqueness for parallel test runs
+    val dateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS")
+    val uniqueId = LocalDateTime.now().format(dateTimeFormatter)
     val workspacePath = Seq(buildDir, className, s"${namePart}_${uniqueId}").mkString("/")
     val workspaceDir = Paths.get(os.pwd.toString, workspacePath)
     // Ensure the workspace directory exists

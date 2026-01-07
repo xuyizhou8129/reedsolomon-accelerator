@@ -101,4 +101,21 @@ class RSEncoderSimpleTest extends AnyFunSpec with ParallelTestExecution {
       }
     }
   }
+  
+  describe("SWModel Encoding") {
+    it("encodes RS(15,11) message using SWModel") {
+      // Create test message with k=11 coefficients
+      val testMessage = (1 to 11).map(BigInt(_))
+      
+      // Call SWModel.encode
+      val codeword = SWModel.encode(testMessage)
+      
+      // Verify codeword length is n=15
+      assert(codeword.length == n, s"Expected codeword length $n, got ${codeword.length}")
+      
+      // Print results for debugging
+      println(s"Message: ${testMessage.mkString(", ")}")
+      println(s"Codeword: ${codeword.mkString(", ")}")
+    }
+  }
 }
