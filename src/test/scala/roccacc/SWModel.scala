@@ -143,9 +143,9 @@ object SWModel {
     // Default generator polynomial coefficients for RS(15,11)
     val DEFAULT_GENERATOR_COEFFS = Seq(
         BigInt(1),      // 0b00000001
-        BigInt(246),    // 0b11110110
-        BigInt(35),     // 0b00100011
-        BigInt(206),    // 0b11001110
+        BigInt(4),      // 0b00000100
+        BigInt(7),      // 0b00000111
+        BigInt(26),     // 0b00011010
         BigInt(24)      // 0b00011000
     )
 

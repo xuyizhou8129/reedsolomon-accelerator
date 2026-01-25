@@ -11,7 +11,7 @@ object RS_Encoder {
   val DEFAULT_FIELD_SIZE = 8
   // Default generator polynomial coefficients for RS(15,11)
   // (x-1)(x-2)(x-3)(x-4)=x^4-10x^3+35x^2-50x+24
-  val DEFAULT_GENERATOR_COEFFS = Seq(1, 246, 35, 206, 24)
+  val DEFAULT_GENERATOR_COEFFS = Seq(1, 4, 7, 26, 24)
 }
 
 class RS_Encoder(
