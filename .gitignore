@@ -21,3 +21,5 @@ vcode-rocc.jar
 .bloop
 .metals
 /project
+
+software/software-model/__pycache__/
