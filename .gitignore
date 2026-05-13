@@ -1,5 +1,8 @@
 out/
 target/
+build/
+test_run_dir/
+test_run_dir.old/
 project/target
 docs/generated
 docs-target/
