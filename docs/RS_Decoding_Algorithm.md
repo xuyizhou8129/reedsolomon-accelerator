@@ -41,6 +41,16 @@ e₀ + e₁x_{n-k-1} + ... + e_{n-1}x_{n-k-1}^{n-1} = S_{n-k-1}
 
 These values `S₀, S₁, ...` are called the **syndromes** — they are non-zero only where errors exist.
 
+### Why only some of `e₀, …, e_{n−1}` can be non-zero
+
+Each coefficient `e_i` is the **error added at symbol position `i`**: position `i` is correct if `e_i = 0` and wrong if `e_i ≠ 0`. The decoder counts errors **by symbol** (one corrupted symbol at one index), not as a free choice of all `n` coefficients.
+
+So if at most **`t` symbols** were corrupted on the channel, then **at most `t` positions `i`** have a non-zero error — i.e. **at most `t` of `e₀,…,e_{n−1}` can be non-zero**, and the rest are **exactly zero** because those symbols arrived intact.
+
+That **sparsity** is essential: without it, `e(x)` would have `n` independent unknown coefficients and the `n−k` syndrome equations would be hopelessly underdetermined.
+
+For guaranteed unique correction, RS only promises recovery when **`t ≤ ⌊(n − k) / 2⌋`** — so you only ever need to look for error vectors with **at most that many** non-zero `e_i`. The decoder’s algebra (Key equation / Berlekamp–Massey, etc.) exploits **exactly this** low Hamming weight, not arbitrary dense `e(x)`.
+
 ---
 
 ## Step 3: Solve for the Error Polynomial
@@ -81,7 +91,7 @@ m₀, m₁, ..., m_{k-1}
 |---|---|
 | **Receive** | Get n symbols, treat as `S'(x)` |
 | **Check** | Plug known roots into `S'(x)` — non-zero means errors |
-| **Model** | Write `S'(x) = S(x) + e(x)`; compute syndromes |
+| **Model** | Write `S'(x) = S(x) + e(x)`; compute syndromes; only a few `e_i` can be non-zero (symbol errors) |
 | **Solve** | Find coefficients of `e(x)` (possible if errors ≤ (n−k)/2) |
 | **Recover** | Compute `S(x) = S'(x) − e(x)`, read off message |
 
