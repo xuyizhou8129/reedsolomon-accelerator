@@ -5,34 +5,28 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import freechips.rocketchip.tile.CoreModule
 
-//The MatSolve module conducts Ax=b by Gaussian elimination.
-//uses a central scratchpad RAM: one memory block stores the matrix data (Matrix.scala)
-//and my MatSolve module computes read from it and write results back to it
-//local buffers for rows and columns can be used to store data
-//Keep the current header comments and example IO interface
-//The current implementation still uses a local buffer for everything
-//use the current code as a template for the new implementation
-//use state machines and initiate hardware modules from GFOperations.scala
-//do not modify GFOperations.scala
-
 class MatSolveIO(addrWidth: Int, dataWidth: Int) extends Bundle {
-  val start = Input(Bool())
-  val done = Output(Bool())
-  val busy = Output(Bool())
+  val start      = Input(Bool())
+  val done       = Output(Bool())
+  val busy       = Output(Bool())
   val unsolvable = Output(Bool())
 
   val baseA = Input(UInt(addrWidth.W))
   val baseB = Input(UInt(addrWidth.W))
   val baseX = Input(UInt(addrWidth.W))
 
-  val memAddr = Output(UInt(addrWidth.W))
+  val memAddr  = Output(UInt(addrWidth.W))
   val memWData = Output(UInt(dataWidth.W))
   val memRData = Input(UInt(dataWidth.W))
-  val memRead = Output(Bool())
+  val memRead  = Output(Bool())
   val memWrite = Output(Bool())
   val memReady = Input(Bool())
 }
 
+// MatSolve performs Ax=b by Gaussian elimination in GF(2^8).
+// No local copy of the matrix is kept; all data is fetched from and written
+// back to the memory scratchpad one element at a time.
+// Layout: A at baseA (row-major), b at baseB, x written to baseX.
 class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
   val fs = GFOperations.DEFAULT_FIELD_SIZE
   require(fs == 8, "MatSolve dataWidth tied to GF(2^8) elements in memory")
@@ -44,375 +38,501 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
   val gfAdd = Module(new GFAdd(fs))
   val gfDiv = Module(new GFDiv(fs))
 
-  gfMul.io.in1.bits := 0.U(ww.W)
-  gfMul.io.in1.valid := false.B
-  gfMul.io.in2.bits := 0.U(ww.W)
-  gfMul.io.in2.valid := false.B
-  gfAdd.io.in1.bits := 0.U(ww.W)
-  gfAdd.io.in1.valid := false.B
-  gfAdd.io.in2.bits := 0.U(ww.W)
-  gfAdd.io.in2.valid := false.B
-  gfDiv.io.in1.bits := 0.U(ww.W)
-  gfDiv.io.in1.valid := false.B
-  gfDiv.io.in2.bits := 0.U(ww.W)
-  gfDiv.io.in2.valid := false.B
+  gfMul.io.in1.bits := 0.U(ww.W); gfMul.io.in1.valid := false.B
+  gfMul.io.in2.bits := 0.U(ww.W); gfMul.io.in2.valid := false.B
+  gfAdd.io.in1.bits := 0.U(ww.W); gfAdd.io.in1.valid := false.B
+  gfAdd.io.in2.bits := 0.U(ww.W); gfAdd.io.in2.valid := false.B
+  gfDiv.io.in1.bits := 0.U(ww.W); gfDiv.io.in1.valid := false.B
+  gfDiv.io.in2.bits := 0.U(ww.W); gfDiv.io.in2.valid := false.B
 
-  object MatSolveState extends ChiselEnum {
-    val idle, loadA, loadB, findpivot, eliminate, backsubstitution, storeX, donePulse = Value
+  object S extends ChiselEnum {
+    val sIdle,
+        // pivot scan
+        sFwScan,
+        // row swap (pivot != numPivots)
+        sFwSwapRdNP, sFwSwapRdPR, sFwSwapWrNP, sFwSwapWrPR,
+        // invert pivot element
+        sFwInvRd, sFwInvS, sFwInvW,
+        // normalize pivot row
+        sFwNormRd, sFwNormMulS, sFwNormMulW, sFwNormWr,
+        // eliminate rows below pivot
+        sFwElimCheckRd,
+        sFwElimPivRd, sFwElimMulS, sFwElimMulW,
+        sFwElimRowRd, sFwElimAddS, sFwElimAddW, sFwElimWr,
+        // advance to next column
+        sFwNextCol,
+        // consistency check
+        sChkRdA, sChkRdB,
+        // back-substitution
+        sBsSetup, sBsRow, sBsRdAcc,
+        sBsColRd, sBsMulS, sBsMulW, sBsAddS, sBsAddW,
+        // store solution
+        sStoreX,
+        sDonePulse = Value
   }
+  import S._
 
-  object Wp extends ChiselEnum {
-    val fwFind, fwInvS, fwInvW, fwNormS, fwNormW, fwElimEnter, fwElimMulS, fwElimMulW, fwAddS, fwAddW, fwNextCol, bsRow, bsMulS, bsMulW, bsAddS, bsAddW = Value
-  }
+  val state = RegInit(sIdle)
 
-  val MatSolve_state = RegInit(MatSolveState.idle)
-  val wp = RegInit(Wp.fwFind)
+  val baseAReg  = Reg(UInt(addrWidth.W))
+  val baseBReg  = Reg(UInt(addrWidth.W))
+  val baseXReg  = Reg(UInt(addrWidth.W))
 
-  val baseAReg = Reg(UInt(addrWidth.W))
-  val baseBReg = Reg(UInt(addrWidth.W))
-  val baseXReg = Reg(UInt(addrWidth.W))
-
-  val loadRow = Reg(UInt(log2Ceil(math.max(rows, 1)).W))
-  val loadCol = Reg(UInt(log2Ceil(math.max(cols, 1)).W))
-  val loadBRow = Reg(UInt(log2Ceil(math.max(rows, 1)).W))
-  val storeXIdx = Reg(UInt(log2Ceil(math.max(cols, 1)).W))
-
-  val aug = Reg(Vec(rows, Vec(cols + 1, UInt(fs.W))))
   val numPivots = Reg(UInt(log2Ceil(rows + 1).W))
-  val colIdx = Reg(UInt(log2Ceil(cols + 1).W))
+  val colIdx    = Reg(UInt(log2Ceil(cols + 1).W))
+  val scanR     = Reg(UInt(log2Ceil(rows + 1).W))
+  val pivRow    = Reg(UInt(log2Ceil(math.max(rows, 2)).W))
+  val hasPivot  = Reg(Bool())
 
-  val hasPivot = Reg(Bool())
-  val invP = Reg(UInt(fs.W))
+  val swapJ     = Reg(UInt(log2Ceil(cols + 2).W))
+  val swapTmpNP = Reg(UInt(fs.W))
+
+  val invP  = Reg(UInt(fs.W))
   val jNorm = Reg(UInt(log2Ceil(cols + 2).W))
-  val elimR = Reg(UInt(log2Ceil(rows).W))
-  val elimJ = Reg(UInt(log2Ceil(cols + 2).W))
-  val fac = Reg(UInt(fs.W))
-  val prod = Reg(UInt(fs.W))
 
+  val elimR = Reg(UInt(log2Ceil(rows + 1).W))
+  val elimJ = Reg(UInt(log2Ceil(cols + 2).W))
+  val fac   = Reg(UInt(fs.W))
+  val prod  = Reg(UInt(fs.W))
+  val rdVal = Reg(UInt(fs.W))
+
+  // pivot column index for each pivot row; set during sFwNextCol
   val pivCol = Reg(Vec(rows, UInt(log2Ceil(math.max(cols, 1)).W)))
-  val bsI = Reg(UInt(log2Ceil(rows + 1).W))
-  val bsJ = Reg(UInt(log2Ceil(rows + 1).W))
+
+  val chkR     = Reg(UInt(log2Ceil(rows + 1).W))
+  val chkC     = Reg(UInt(log2Ceil(cols + 1).W))
+  val allZeroA = Reg(Bool())
+
+  val bsI   = Reg(UInt(log2Ceil(rows + 1).W))
+  val bsJ   = Reg(UInt(log2Ceil(rows + 1).W))
   val bsAcc = Reg(UInt(fs.W))
 
-  val xReg = Reg(Vec(cols, UInt(fs.W)))
-  val unsolv = RegInit(false.B)
+  val xReg      = RegInit(VecInit(Seq.fill(cols)(0.U(fs.W))))
+  val storeXIdx = Reg(UInt(log2Ceil(math.max(cols, 1)).W))
+  val unsolv    = RegInit(false.B)
 
-  // Default memory interface
-  io.memAddr := 0.U(addrWidth.W)
-  io.memWData := 0.U(fs.W)
-  io.memRead := false.B
-  io.memWrite := false.B
-  io.done := false.B
-  io.busy := MatSolve_state =/= MatSolveState.idle
+  io.memAddr    := 0.U
+  io.memWData   := 0.U
+  io.memRead    := false.B
+  io.memWrite   := false.B
+  io.done       := false.B
+  io.busy       := state =/= sIdle
   io.unsolvable := unsolv
 
   def pz(u: UInt): UInt = u.pad(ww)
 
-  switch(MatSolve_state) {
-    is(MatSolveState.idle) {
+  // aug[r][j]: for j < cols -> A at baseA + r*cols + j; for j = cols -> b at baseB + r
+  def addrA(r: UInt, c: UInt): UInt = baseAReg + r * cols.U + c
+  def addrB(r: UInt): UInt          = baseBReg + r
+  def augAddr(r: UInt, j: UInt): UInt =
+    Mux(j < cols.U, addrA(r, j), addrB(r))
+
+  switch(state) {
+    is(sIdle) {
       unsolv := false.B
       when(io.start) {
-        baseAReg := io.baseA
-        baseBReg := io.baseB
-        baseXReg := io.baseX
-        loadRow := 0.U
-        loadCol := 0.U
-        MatSolve_state := MatSolveState.loadA
-        printf("(MatSolve) start: load from memory\n")
+        baseAReg  := io.baseA
+        baseBReg  := io.baseB
+        baseXReg  := io.baseX
+        numPivots := 0.U
+        colIdx    := 0.U
+        scanR     := 0.U
+        hasPivot  := false.B
+        state     := sFwScan
+        printf("(MatSolve) start: scratchpad-based computation\n")
       }
     }
 
-    is(MatSolveState.loadA) {
-      val aOff = (loadRow * cols.U) + loadCol
-      io.memAddr := baseAReg + aOff
-      io.memRead := true.B
-      when(io.memReady && io.memRead) {
-        aug(loadRow)(loadCol) := io.memRData
-        when(loadRow === (rows - 1).U && loadCol === (cols - 1).U) {
-          loadBRow := 0.U
-          MatSolve_state := MatSolveState.loadB
-        }.elsewhen(loadCol === (cols - 1).U) {
-          loadCol := 0.U
-          loadRow := loadRow + 1.U
-        }.otherwise {
-          loadCol := loadCol + 1.U
-        }
-      }
-    }
-
-    is(MatSolveState.loadB) {
-      io.memAddr := baseBReg + loadBRow
-      io.memRead := true.B
-      when(io.memReady && io.memRead) {
-        aug(loadBRow)(cols) := io.memRData
-        when(loadBRow === (rows - 1).U) {
-          numPivots := 0.U
-          colIdx := 0.U
-          wp := Wp.fwFind
-          MatSolve_state := MatSolveState.findpivot
-        }.otherwise {
-          loadBRow := loadBRow + 1.U
-        }
-      }
-    }
-
-    is(MatSolveState.findpivot) {
-      switch(wp) {
-        is(Wp.fwFind) {
-          val rel = Wire(Vec(rows, Bool()))
-          for (r <- 0 until rows) {
-            rel(r) := (r.U >= numPivots) && aug(r)(colIdx) =/= 0.U
-          }
-          val hp = numPivots < rows.U && rel.asUInt.orR
-          val pr = numPivots + PriorityEncoder(rel.asUInt)
-          hasPivot := hp
-          when(hp) {
-            for (j <- 0 to cols) {
-              val a = aug(numPivots)(j)
-              val b = aug(pr)(j)
-              aug(numPivots)(j) := Mux(pr =/= numPivots, b, a)
-              aug(pr)(j) := Mux(pr =/= numPivots, a, b)
-            }
-            wp := Wp.fwInvS
-          }.otherwise {
-            wp := Wp.fwNextCol
-          }
-        }
-
-        is(Wp.fwInvS) {
-          when(gfDiv.io.in1.ready && gfDiv.io.in2.ready) {
-            gfDiv.io.in1.bits := 1.U(ww.W)
-            gfDiv.io.in1.valid := true.B
-            gfDiv.io.in2.bits := pz(aug(numPivots)(colIdx))
-            gfDiv.io.in2.valid := true.B
-            wp := Wp.fwInvW
-          }
-        }
-
-        is(Wp.fwInvW) {
-          when(gfDiv.io.out.valid) {
-            invP := gfDiv.io.out.bits
-            gfDiv.io.in1.valid := false.B
-            gfDiv.io.in2.valid := false.B
-            jNorm := colIdx
-            wp := Wp.fwNormS
-          }
-        }
-
-        is(Wp.fwNormS) {
-          when(gfMul.io.in1.ready && gfMul.io.in2.ready) {
-            gfMul.io.in1.bits := pz(aug(numPivots)(jNorm))
-            gfMul.io.in1.valid := true.B
-            gfMul.io.in2.bits := pz(invP)
-            gfMul.io.in2.valid := true.B
-            wp := Wp.fwNormW
-          }
-        }
-
-        is(Wp.fwNormW) {
-          when(gfMul.io.out.valid) {
-            aug(numPivots)(jNorm) := gfMul.io.out.bits
-            gfMul.io.in1.valid := false.B
-            gfMul.io.in2.valid := false.B
-            when(jNorm === cols.U) {
-              elimR := numPivots + 1.U
-              wp := Wp.fwElimEnter
+    // Scan rows >= numPivots for first non-zero in column colIdx
+    is(sFwScan) {
+      when(scanR >= rows.U) {
+        hasPivot := false.B
+        state    := sFwNextCol
+      }.otherwise {
+        io.memAddr := augAddr(scanR, colIdx)
+        io.memRead := true.B
+        // Keeps requesting until a valid signal is received
+        when(io.memReady) {
+          when(io.memRData =/= 0.U) {
+            pivRow   := scanR
+            hasPivot := true.B
+            when(scanR === numPivots) {
+              state := sFwInvRd        // pivot already in place, skip swap
             }.otherwise {
-              jNorm := jNorm + 1.U
-              wp := Wp.fwNormS
+              swapJ := 0.U
+              state := sFwSwapRdNP
             }
+          }.otherwise {
+            scanR := scanR + 1.U
           }
         }
+      }
+    }
 
-        is(Wp.fwElimEnter) {
-          when(elimR >= rows.U) {
-            wp := Wp.fwNextCol
-          }.elsewhen(aug(elimR)(colIdx) === 0.U) {
+    // Swap rows numPivots and pivRow, column by column (j = 0..cols)
+    is(sFwSwapRdNP) {
+      io.memAddr := augAddr(numPivots, swapJ)
+      io.memRead := true.B
+      when(io.memReady) {
+        swapTmpNP := io.memRData
+        state     := sFwSwapRdPR
+      }
+    }
+
+    is(sFwSwapRdPR) {
+      io.memAddr := augAddr(pivRow, swapJ)
+      io.memRead := true.B
+      when(io.memReady) {
+        rdVal := io.memRData
+        state := sFwSwapWrNP
+      }
+    }
+
+    is(sFwSwapWrNP) {
+      io.memAddr  := augAddr(numPivots, swapJ)
+      io.memWData := rdVal
+      io.memWrite := true.B
+      when(io.memReady) { state := sFwSwapWrPR }
+    }
+
+    is(sFwSwapWrPR) {
+      io.memAddr  := augAddr(pivRow, swapJ)
+      io.memWData := swapTmpNP
+      io.memWrite := true.B
+      when(io.memReady) {
+        when(swapJ === cols.U) {
+          state := sFwInvRd
+        }.otherwise {
+          swapJ := swapJ + 1.U
+          state := sFwSwapRdNP
+        }
+      }
+    }
+
+    // Read aug[numPivots][colIdx] to compute its inverse
+    is(sFwInvRd) {
+      io.memAddr := augAddr(numPivots, colIdx)
+      io.memRead := true.B
+      when(io.memReady) {
+        rdVal := io.memRData
+        state := sFwInvS
+      }
+    }
+
+    is(sFwInvS) {
+      when(gfDiv.io.in1.ready && gfDiv.io.in2.ready) {
+        gfDiv.io.in1.bits  := 1.U(ww.W)
+        gfDiv.io.in1.valid := true.B
+        gfDiv.io.in2.bits  := pz(rdVal)
+        gfDiv.io.in2.valid := true.B
+        state              := sFwInvW
+      }
+    }
+
+    is(sFwInvW) {
+      when(gfDiv.io.out.valid) {
+        invP  := gfDiv.io.out.bits
+        jNorm := colIdx
+        state := sFwNormRd
+      }
+    }
+
+    // Normalize pivot row: aug[numPivots][j] *= invP  for j = colIdx..cols
+    is(sFwNormRd) {
+      io.memAddr := augAddr(numPivots, jNorm)
+      io.memRead := true.B
+      when(io.memReady) {
+        rdVal := io.memRData
+        state := sFwNormMulS
+      }
+    }
+
+    is(sFwNormMulS) {
+      when(gfMul.io.in1.ready && gfMul.io.in2.ready) {
+        gfMul.io.in1.bits  := pz(rdVal)
+        gfMul.io.in1.valid := true.B
+        gfMul.io.in2.bits  := pz(invP)
+        gfMul.io.in2.valid := true.B
+        state              := sFwNormMulW
+      }
+    }
+
+    is(sFwNormMulW) {
+      when(gfMul.io.out.valid) {
+        rdVal := gfMul.io.out.bits
+        state := sFwNormWr
+      }
+    }
+
+    is(sFwNormWr) {
+      io.memAddr  := augAddr(numPivots, jNorm)
+      io.memWData := rdVal
+      io.memWrite := true.B
+      when(io.memReady) {
+        when(jNorm === cols.U) {
+          elimR := numPivots + 1.U
+          state := sFwElimCheckRd
+        }.otherwise {
+          jNorm := jNorm + 1.U
+          state := sFwNormRd
+        }
+      }
+    }
+
+    // For each row elimR > numPivots with non-zero factor: zero out column colIdx
+    // and propagate to all columns j = colIdx..cols
+    is(sFwElimCheckRd) {
+      when(elimR >= rows.U) {
+        state := sFwNextCol
+      }.otherwise {
+        io.memAddr := augAddr(elimR, colIdx)
+        io.memRead := true.B
+        when(io.memReady) {
+          when(io.memRData === 0.U) {
             elimR := elimR + 1.U
           }.otherwise {
-            fac := aug(elimR)(colIdx)
+            fac   := io.memRData
             elimJ := colIdx
-            wp := Wp.fwElimMulS
-          }
-        }
-
-        is(Wp.fwElimMulS) {
-          when(gfMul.io.in1.ready && gfMul.io.in2.ready) {
-            gfMul.io.in1.bits := pz(fac)
-            gfMul.io.in1.valid := true.B
-            gfMul.io.in2.bits := pz(aug(numPivots)(elimJ))
-            gfMul.io.in2.valid := true.B
-            wp := Wp.fwElimMulW
-          }
-        }
-
-        is(Wp.fwElimMulW) {
-          when(gfMul.io.out.valid) {
-            prod := gfMul.io.out.bits
-            gfMul.io.in1.valid := false.B
-            gfMul.io.in2.valid := false.B
-            wp := Wp.fwAddS
-          }
-        }
-
-        is(Wp.fwAddS) {
-          when(gfAdd.io.in1.ready && gfAdd.io.in2.ready) {
-            gfAdd.io.in1.bits := pz(aug(elimR)(elimJ))
-            gfAdd.io.in1.valid := true.B
-            gfAdd.io.in2.bits := pz(prod)
-            gfAdd.io.in2.valid := true.B
-            wp := Wp.fwAddW
-          }
-        }
-
-        is(Wp.fwAddW) {
-          when(gfAdd.io.out.valid) {
-            aug(elimR)(elimJ) := gfAdd.io.out.bits
-            gfAdd.io.in1.valid := false.B
-            gfAdd.io.in2.valid := false.B
-            when(elimJ === cols.U) {
-              elimR := elimR + 1.U
-              wp := Wp.fwElimEnter
-            }.otherwise {
-              elimJ := elimJ + 1.U
-              wp := Wp.fwElimMulS
-            }
-          }
-        }
-
-        is(Wp.fwNextCol) {
-          when(hasPivot) {
-            numPivots := numPivots + 1.U
-          }
-          when(colIdx === (cols - 1).U) {
-            MatSolve_state := MatSolveState.eliminate
-          }.otherwise {
-            colIdx := colIdx + 1.U
-            wp := Wp.fwFind
+            state := sFwElimPivRd
           }
         }
       }
     }
 
-    is(MatSolveState.eliminate) {
-      val bad = (0 until rows).map { r =>
-        val ge = r.U >= numPivots
-        val az = (0 until cols).map(c => aug(r)(c) === 0.U).reduce(_ && _)
-        ge && az && aug(r)(cols) =/= 0.U
-      }.reduce(_ || _)
-      unsolv := bad
-      when(bad) {
-        MatSolve_state := MatSolveState.donePulse
-      }.elsewhen(numPivots === 0.U) {
-        storeXIdx := 0.U
-        MatSolve_state := MatSolveState.storeX
+    // For each column elimJ: compute fac * aug[numPivots][elimJ], add to aug[elimR][elimJ]
+    is(sFwElimPivRd) {
+      io.memAddr := augAddr(numPivots, elimJ)
+      io.memRead := true.B
+      when(io.memReady) {
+        rdVal := io.memRData
+        state := sFwElimMulS
+      }
+    }
+
+    is(sFwElimMulS) {
+      when(gfMul.io.in1.ready && gfMul.io.in2.ready) {
+        gfMul.io.in1.bits  := pz(fac)
+        gfMul.io.in1.valid := true.B
+        gfMul.io.in2.bits  := pz(rdVal)
+        gfMul.io.in2.valid := true.B
+        state              := sFwElimMulW
+      }
+    }
+
+    is(sFwElimMulW) {
+      when(gfMul.io.out.valid) {
+        prod  := gfMul.io.out.bits
+        state := sFwElimRowRd
+      }
+    }
+
+    is(sFwElimRowRd) {
+      io.memAddr := augAddr(elimR, elimJ)
+      io.memRead := true.B
+      when(io.memReady) {
+        rdVal := io.memRData
+        state := sFwElimAddS
+      }
+    }
+
+    is(sFwElimAddS) {
+      when(gfAdd.io.in1.ready && gfAdd.io.in2.ready) {
+        gfAdd.io.in1.bits  := pz(rdVal)
+        gfAdd.io.in1.valid := true.B
+        gfAdd.io.in2.bits  := pz(prod)
+        gfAdd.io.in2.valid := true.B
+        state              := sFwElimAddW
+      }
+    }
+
+    is(sFwElimAddW) {
+      when(gfAdd.io.out.valid) {
+        rdVal := gfAdd.io.out.bits
+        state := sFwElimWr
+      }
+    }
+
+    is(sFwElimWr) {
+      io.memAddr  := augAddr(elimR, elimJ)
+      io.memWData := rdVal
+      io.memWrite := true.B
+      when(io.memReady) {
+        when(elimJ === cols.U) {
+          elimR := elimR + 1.U
+          state := sFwElimCheckRd
+        }.otherwise {
+          elimJ := elimJ + 1.U
+          state := sFwElimPivRd
+        }
+      }
+    }
+
+    // Record pivot column, increment numPivots, advance to next column or consistency check
+    is(sFwNextCol) {
+      val newNP = Mux(hasPivot, numPivots + 1.U, numPivots)
+      when(hasPivot) {
+        pivCol(numPivots) := colIdx
+        numPivots         := newNP
+      }
+      when(colIdx === (cols - 1).U) {
+        chkR     := newNP
+        chkC     := 0.U
+        allZeroA := true.B
+        state    := sChkRdA
       }.otherwise {
-        for (r <- 0 until rows) {
-          val fl = VecInit((0 until cols).map(c => aug(r)(c) =/= 0.U))
-          pivCol(r) := PriorityEncoder(fl.asUInt)
-        }
-        bsI := numPivots - 1.U
-        wp := Wp.bsRow
-        MatSolve_state := MatSolveState.backsubstitution
+        colIdx := colIdx + 1.U
+        scanR  := newNP
+        state  := sFwScan
       }
-      printf("(MatSolve) eliminate\n")
     }
 
-    is(MatSolveState.backsubstitution) {
-      switch(wp) {
-        is(Wp.bsRow) {
-          when(bsI >= numPivots) {
-            storeXIdx := 0.U
-            MatSolve_state := MatSolveState.storeX
+    // For rows chkR >= numPivots: check all-zero A row with non-zero b => inconsistent
+    is(sChkRdA) {
+      when(chkR >= rows.U) {
+        state := sBsSetup
+      }.otherwise {
+        io.memAddr := addrA(chkR, chkC)
+        io.memRead := true.B
+        when(io.memReady) {
+          //TODO: Add an early exit if allZeroA is false
+          when(io.memRData =/= 0.U) { allZeroA := false.B }
+          when(chkC === (cols - 1).U) {
+            state := sChkRdB
           }.otherwise {
-            val ci = pivCol(bsI)
-            bsAcc := aug(bsI)(cols)
-            bsJ := bsI + 1.U
-            when(bsI + 1.U >= numPivots) {
-              xReg(ci) := aug(bsI)(cols)
-              when(bsI === 0.U) {
-                storeXIdx := 0.U
-                MatSolve_state := MatSolveState.storeX
-              }.otherwise {
-                bsI := bsI - 1.U
-              }
-            }.otherwise {
-              wp := Wp.bsMulS
-            }
-          }
-        }
-
-        is(Wp.bsMulS) {
-          when(gfMul.io.in1.ready && gfMul.io.in2.ready) {
-            gfMul.io.in1.bits := pz(aug(bsI)(pivCol(bsJ)))
-            gfMul.io.in1.valid := true.B
-            gfMul.io.in2.bits := pz(xReg(pivCol(bsJ)))
-            gfMul.io.in2.valid := true.B
-            wp := Wp.bsMulW
-          }
-        }
-
-        is(Wp.bsMulW) {
-          when(gfMul.io.out.valid) {
-            prod := gfMul.io.out.bits
-            gfMul.io.in1.valid := false.B
-            gfMul.io.in2.valid := false.B
-            wp := Wp.bsAddS
-          }
-        }
-
-        is(Wp.bsAddS) {
-          when(gfAdd.io.in1.ready && gfAdd.io.in2.ready) {
-            gfAdd.io.in1.bits := pz(bsAcc)
-            gfAdd.io.in1.valid := true.B
-            gfAdd.io.in2.bits := pz(prod)
-            gfAdd.io.in2.valid := true.B
-            wp := Wp.bsAddW
-          }
-        }
-
-        is(Wp.bsAddW) {
-          when(gfAdd.io.out.valid) {
-            val newAcc = gfAdd.io.out.bits
-            bsAcc := newAcc
-            gfAdd.io.in1.valid := false.B
-            gfAdd.io.in2.valid := false.B
-            val nextJ = bsJ + 1.U
-            bsJ := nextJ
-            val ci = pivCol(bsI)
-            when(nextJ >= numPivots) {
-              xReg(ci) := newAcc
-              when(bsI === 0.U) {
-                storeXIdx := 0.U
-                MatSolve_state := MatSolveState.storeX
-              }.otherwise {
-                bsI := bsI - 1.U
-                wp := Wp.bsRow
-              }
-            }.otherwise {
-              wp := Wp.bsMulS
-            }
+            chkC := chkC + 1.U
           }
         }
       }
     }
 
-    is(MatSolveState.storeX) {
-      io.memAddr := baseXReg + storeXIdx
+    is(sChkRdB) {
+      io.memAddr := addrB(chkR)
+      io.memRead := true.B
+      when(io.memReady) {
+        when(allZeroA && io.memRData =/= 0.U) {
+          unsolv := true.B
+          state  := sDonePulse
+        }.otherwise {
+          chkR     := chkR + 1.U
+          chkC     := 0.U
+          allZeroA := true.B
+          state    := sChkRdA
+        }
+      }
+    }
+
+    is(sBsSetup) {
+      when(numPivots === 0.U) {
+        storeXIdx := 0.U
+        state     := sStoreX
+      }.otherwise {
+        bsI   := numPivots - 1.U
+        state := sBsRow
+      }
+    }
+
+    // Back-substitution: for row bsI (descending), compute x[pivCol[bsI]]
+    is(sBsRow) {
+      bsJ   := bsI + 1.U
+      state := sBsRdAcc
+    }
+
+    // Read b value for row bsI; if no further terms, set x directly
+    is(sBsRdAcc) {
+      io.memAddr := addrB(bsI)
+      io.memRead := true.B
+      when(io.memReady) {
+        val bVal = io.memRData
+        bsAcc := bVal
+        when(bsJ >= numPivots) {
+          xReg(pivCol(bsI)) := bVal
+          when(bsI === 0.U) {
+            storeXIdx := 0.U
+            state     := sStoreX
+          }.otherwise {
+            bsI   := bsI - 1.U
+            state := sBsRow
+          }
+        }.otherwise {
+          state := sBsColRd
+        }
+      }
+    }
+
+    // For each bsJ > bsI: bsAcc ^= aug[bsI][pivCol[bsJ]] * x[pivCol[bsJ]]
+    is(sBsColRd) {
+      io.memAddr := addrA(bsI, pivCol(bsJ))
+      io.memRead := true.B
+      when(io.memReady) {
+        rdVal := io.memRData
+        state := sBsMulS
+      }
+    }
+
+    is(sBsMulS) {
+      when(gfMul.io.in1.ready && gfMul.io.in2.ready) {
+        gfMul.io.in1.bits  := pz(rdVal)
+        gfMul.io.in1.valid := true.B
+        gfMul.io.in2.bits  := pz(xReg(pivCol(bsJ)))
+        gfMul.io.in2.valid := true.B
+        state              := sBsMulW
+      }
+    }
+
+    is(sBsMulW) {
+      when(gfMul.io.out.valid) {
+        prod  := gfMul.io.out.bits
+        state := sBsAddS
+      }
+    }
+
+    is(sBsAddS) {
+      when(gfAdd.io.in1.ready && gfAdd.io.in2.ready) {
+        gfAdd.io.in1.bits  := pz(bsAcc)
+        gfAdd.io.in1.valid := true.B
+        gfAdd.io.in2.bits  := pz(prod)
+        gfAdd.io.in2.valid := true.B
+        state              := sBsAddW
+      }
+    }
+
+    is(sBsAddW) {
+      when(gfAdd.io.out.valid) {
+        val newAcc = gfAdd.io.out.bits
+        bsAcc     := newAcc
+        val nextJ  = bsJ + 1.U
+        when(nextJ >= numPivots) {
+          xReg(pivCol(bsI)) := newAcc
+          when(bsI === 0.U) {
+            storeXIdx := 0.U
+            state     := sStoreX
+          }.otherwise {
+            bsI   := bsI - 1.U
+            state := sBsRow
+          }
+        }.otherwise {
+          bsJ   := nextJ
+          state := sBsColRd
+        }
+      }
+    }
+
+    is(sStoreX) {
+      io.memAddr  := baseXReg + storeXIdx
       io.memWData := xReg(storeXIdx)
       io.memWrite := true.B
-      when(io.memReady && io.memWrite) {
+      when(io.memReady) {
         when(storeXIdx === (cols - 1).U) {
-          MatSolve_state := MatSolveState.donePulse
+          state := sDonePulse
         }.otherwise {
           storeXIdx := storeXIdx + 1.U
         }
       }
     }
 
-    is(MatSolveState.donePulse) {
+    is(sDonePulse) {
       io.done := true.B
-      MatSolve_state := MatSolveState.idle
+      state   := sIdle
       printf("(MatSolve) done\n")
     }
   }
