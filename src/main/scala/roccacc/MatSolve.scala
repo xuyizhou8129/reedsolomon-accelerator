@@ -5,11 +5,14 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import freechips.rocketchip.tile.CoreModule
 
-class MatSolveIO(addrWidth: Int, dataWidth: Int) extends Bundle {
+class MatSolveIO(addrWidth: Int, dataWidth: Int, maxRows: Int, maxCols: Int) extends Bundle {
   val start      = Input(Bool())
   val done       = Output(Bool())
   val busy       = Output(Bool())
   val unsolvable = Output(Bool())
+
+  val rows = Input(UInt(log2Ceil(maxRows + 1).W))
+  val cols = Input(UInt(log2Ceil(maxCols + 1).W))
 
   val baseA = Input(UInt(addrWidth.W))
   val baseB = Input(UInt(addrWidth.W))
@@ -26,13 +29,14 @@ class MatSolveIO(addrWidth: Int, dataWidth: Int) extends Bundle {
 // MatSolve performs Ax=b by Gaussian elimination in GF(2^8).
 // No local copy of the matrix is kept; all data is fetched from and written
 // back to the memory scratchpad one element at a time.
-// Layout: A at baseA (row-major), b at baseB, x written to baseX.
-class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
+// Layout: A at baseA (row-major, rows×cols), b at baseB (rows entries), x written to baseX (cols entries).
+// maxRows/maxCols set register widths at elaboration time; io.rows/io.cols supply actual dimensions at runtime.
+class MatSolve(maxRows: Int, maxCols: Int, addrWidth: Int = 32) extends Module {
   val fs = GFOperations.DEFAULT_FIELD_SIZE
   require(fs == 8, "MatSolve dataWidth tied to GF(2^8) elements in memory")
   val ww = 2 * fs
 
-  val io = IO(new MatSolveIO(addrWidth, fs))
+  val io = IO(new MatSolveIO(addrWidth, fs, maxRows, maxCols))
 
   val gfMul = Module(new GFMul(fs))
   val gfAdd = Module(new GFAdd(fs))
@@ -74,41 +78,45 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
 
   val state = RegInit(sIdle)
 
-  val baseAReg  = Reg(UInt(addrWidth.W))
-  val baseBReg  = Reg(UInt(addrWidth.W))
-  val baseXReg  = Reg(UInt(addrWidth.W))
+  val baseAReg = Reg(UInt(addrWidth.W))
+  val baseBReg = Reg(UInt(addrWidth.W))
+  val baseXReg = Reg(UInt(addrWidth.W))
 
-  val numPivots = Reg(UInt(log2Ceil(rows + 1).W))
-  val colIdx    = Reg(UInt(log2Ceil(cols + 1).W))
-  val scanR     = Reg(UInt(log2Ceil(rows + 1).W))
-  val pivRow    = Reg(UInt(log2Ceil(math.max(rows, 2)).W))
+  // Runtime dimensions latched from io on start
+  val rowsReg = Reg(UInt(log2Ceil(maxRows + 1).W))
+  val colsReg = Reg(UInt(log2Ceil(maxCols + 1).W))
+
+  val numPivots = Reg(UInt(log2Ceil(maxRows + 1).W))
+  val colIdx    = Reg(UInt(log2Ceil(maxCols + 1).W))
+  val scanR     = Reg(UInt(log2Ceil(maxRows + 1).W))
+  val pivRow    = Reg(UInt(log2Ceil(math.max(maxRows, 2)).W))
   val hasPivot  = Reg(Bool())
 
-  val swapJ     = Reg(UInt(log2Ceil(cols + 2).W))
+  val swapJ     = Reg(UInt(log2Ceil(maxCols + 2).W))
   val swapTmpNP = Reg(UInt(fs.W))
 
   val invP  = Reg(UInt(fs.W))
-  val jNorm = Reg(UInt(log2Ceil(cols + 2).W))
+  val jNorm = Reg(UInt(log2Ceil(maxCols + 2).W))
 
-  val elimR = Reg(UInt(log2Ceil(rows + 1).W))
-  val elimJ = Reg(UInt(log2Ceil(cols + 2).W))
+  val elimR = Reg(UInt(log2Ceil(maxRows + 1).W))
+  val elimJ = Reg(UInt(log2Ceil(maxCols + 2).W))
   val fac   = Reg(UInt(fs.W))
   val prod  = Reg(UInt(fs.W))
   val rdVal = Reg(UInt(fs.W))
 
   // pivot column index for each pivot row; set during sFwNextCol
-  val pivCol = Reg(Vec(rows, UInt(log2Ceil(math.max(cols, 1)).W)))
+  val pivCol = Reg(Vec(maxRows, UInt(log2Ceil(math.max(maxCols, 1)).W)))
 
-  val chkR     = Reg(UInt(log2Ceil(rows + 1).W))
-  val chkC     = Reg(UInt(log2Ceil(cols + 1).W))
+  val chkR     = Reg(UInt(log2Ceil(maxRows + 1).W))
+  val chkC     = Reg(UInt(log2Ceil(maxCols + 1).W))
   val allZeroA = Reg(Bool())
 
-  val bsI   = Reg(UInt(log2Ceil(rows + 1).W))
-  val bsJ   = Reg(UInt(log2Ceil(rows + 1).W))
+  val bsI   = Reg(UInt(log2Ceil(maxRows + 1).W))
+  val bsJ   = Reg(UInt(log2Ceil(maxRows + 1).W))
   val bsAcc = Reg(UInt(fs.W))
 
-  val xReg      = RegInit(VecInit(Seq.fill(cols)(0.U(fs.W))))
-  val storeXIdx = Reg(UInt(log2Ceil(math.max(cols, 1)).W))
+  val xReg      = RegInit(VecInit(Seq.fill(maxCols)(0.U(fs.W))))
+  val storeXIdx = Reg(UInt(log2Ceil(math.max(maxCols, 1)).W))
   val unsolv    = RegInit(false.B)
 
   io.memAddr    := 0.U
@@ -121,11 +129,11 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
 
   def pz(u: UInt): UInt = u.pad(ww)
 
-  // aug[r][j]: for j < cols -> A at baseA + r*cols + j; for j = cols -> b at baseB + r
-  def addrA(r: UInt, c: UInt): UInt = baseAReg + r * cols.U + c
+  // aug[r][j]: for j < colsReg -> A at baseA + r*colsReg + j; for j = colsReg -> b at baseB + r
+  def addrA(r: UInt, c: UInt): UInt = baseAReg + r * colsReg + c
   def addrB(r: UInt): UInt          = baseBReg + r
   def augAddr(r: UInt, j: UInt): UInt =
-    Mux(j < cols.U, addrA(r, j), addrB(r))
+    Mux(j < colsReg, addrA(r, j), addrB(r))
 
   switch(state) {
     is(sIdle) {
@@ -134,24 +142,27 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
         baseAReg  := io.baseA
         baseBReg  := io.baseB
         baseXReg  := io.baseX
+        rowsReg   := io.rows
+        colsReg   := io.cols
         numPivots := 0.U
         colIdx    := 0.U
         scanR     := 0.U
         hasPivot  := false.B
-        state     := sFwScan
+        // Zero xReg so partial solutions from prior runs don't pollute output
+        for (i <- 0 until maxCols) { xReg(i) := 0.U }
+        state := sFwScan
         printf("(MatSolve) start: scratchpad-based computation\n")
       }
     }
 
     // Scan rows >= numPivots for first non-zero in column colIdx
     is(sFwScan) {
-      when(scanR >= rows.U) {
+      when(scanR >= rowsReg) {
         hasPivot := false.B
         state    := sFwNextCol
       }.otherwise {
         io.memAddr := augAddr(scanR, colIdx)
         io.memRead := true.B
-        // Keeps requesting until a valid signal is received
         when(io.memReady) {
           when(io.memRData =/= 0.U) {
             pivRow   := scanR
@@ -169,7 +180,7 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
       }
     }
 
-    // Swap rows numPivots and pivRow, column by column (j = 0..cols)
+    // Swap rows numPivots and pivRow, column by column (j = 0..colsReg)
     is(sFwSwapRdNP) {
       io.memAddr := augAddr(numPivots, swapJ)
       io.memRead := true.B
@@ -200,7 +211,7 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
       io.memWData := swapTmpNP
       io.memWrite := true.B
       when(io.memReady) {
-        when(swapJ === cols.U) {
+        when(swapJ === colsReg) {
           state := sFwInvRd
         }.otherwise {
           swapJ := swapJ + 1.U
@@ -237,7 +248,7 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
       }
     }
 
-    // Normalize pivot row: aug[numPivots][j] *= invP  for j = colIdx..cols
+    // Normalize pivot row: aug[numPivots][j] *= invP  for j = colIdx..colsReg
     is(sFwNormRd) {
       io.memAddr := augAddr(numPivots, jNorm)
       io.memRead := true.B
@@ -269,7 +280,7 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
       io.memWData := rdVal
       io.memWrite := true.B
       when(io.memReady) {
-        when(jNorm === cols.U) {
+        when(jNorm === colsReg) {
           elimR := numPivots + 1.U
           state := sFwElimCheckRd
         }.otherwise {
@@ -280,9 +291,9 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
     }
 
     // For each row elimR > numPivots with non-zero factor: zero out column colIdx
-    // and propagate to all columns j = colIdx..cols
+    // and propagate to all columns j = colIdx..colsReg
     is(sFwElimCheckRd) {
-      when(elimR >= rows.U) {
+      when(elimR >= rowsReg) {
         state := sFwNextCol
       }.otherwise {
         io.memAddr := augAddr(elimR, colIdx)
@@ -357,7 +368,7 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
       io.memWData := rdVal
       io.memWrite := true.B
       when(io.memReady) {
-        when(elimJ === cols.U) {
+        when(elimJ === colsReg) {
           elimR := elimR + 1.U
           state := sFwElimCheckRd
         }.otherwise {
@@ -374,7 +385,7 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
         pivCol(numPivots) := colIdx
         numPivots         := newNP
       }
-      when(colIdx === (cols - 1).U) {
+      when(colIdx === colsReg - 1.U) {
         chkR     := newNP
         chkC     := 0.U
         allZeroA := true.B
@@ -388,15 +399,14 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
 
     // For rows chkR >= numPivots: check all-zero A row with non-zero b => inconsistent
     is(sChkRdA) {
-      when(chkR >= rows.U) {
+      when(chkR >= rowsReg) {
         state := sBsSetup
       }.otherwise {
         io.memAddr := addrA(chkR, chkC)
         io.memRead := true.B
         when(io.memReady) {
-          //TODO: Add an early exit if allZeroA is false
           when(io.memRData =/= 0.U) { allZeroA := false.B }
-          when(chkC === (cols - 1).U) {
+          when(chkC === colsReg - 1.U) {
             state := sChkRdB
           }.otherwise {
             chkC := chkC + 1.U
@@ -522,7 +532,7 @@ class MatSolve(rows: Int, cols: Int, addrWidth: Int = 32) extends Module {
       io.memWData := xReg(storeXIdx)
       io.memWrite := true.B
       when(io.memReady) {
-        when(storeXIdx === (cols - 1).U) {
+        when(storeXIdx === colsReg - 1.U) {
           state := sDonePulse
         }.otherwise {
           storeXIdx := storeXIdx + 1.U

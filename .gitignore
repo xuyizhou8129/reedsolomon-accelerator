@@ -28,3 +28,7 @@ software/software-model/__pycache__/
 docs/log.md
 docs/matsolve.md
 docs/checkroots.md
+docs/coordinator.md
+
+# Cluade skills
+.claude/

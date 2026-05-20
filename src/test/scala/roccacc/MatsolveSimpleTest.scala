@@ -60,6 +60,8 @@ class MatsolveSimpleTest extends AnyFunSpec with ParallelTestExecution {
     simulate(new MatSolve(rows, cols), buildDir = "build", enableWaves = true,
       testName = Some(testName)) { dut =>
 
+      dut.io.rows.poke(rows.U)
+      dut.io.cols.poke(cols.U)
       dut.io.baseA.poke(baseA.U)
       dut.io.baseB.poke(baseB.U)
       dut.io.baseX.poke(baseX.U)
@@ -161,6 +163,8 @@ class MatsolveSimpleTest extends AnyFunSpec with ParallelTestExecution {
       simulate(new MatSolve(rows, cols), buildDir = "build", enableWaves = true,
         testName = Some("unsolvable_4x4")) { dut =>
 
+        dut.io.rows.poke(rows.U)
+        dut.io.cols.poke(cols.U)
         dut.io.baseA.poke(baseA.U)
         dut.io.baseB.poke(baseB.U)
         dut.io.baseX.poke(baseX.U)
