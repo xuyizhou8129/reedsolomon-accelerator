@@ -19,10 +19,12 @@ vcode-rocc.jar
 
 # LSP stuff
 .bloop
-.metals
+.metals 
 /project
 
+# Python cache
 software/software-model/__pycache__/
+software/software-model/Decoder/__pycache__/
 
 # Promts
 docs/log.md

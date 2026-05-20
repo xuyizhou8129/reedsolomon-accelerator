@@ -11,6 +11,8 @@ object SWCheckRoots {
     mat:       Seq[Seq[BigInt]]
   )
 
+  // Convention: coeffs(0) is the highest-degree coefficient (matches SWModel.encode).
+  // Evaluates P(r) = sum_j coeffs(j) * r^(n-1-j); mat(idx)(j) = r^(n-1-j).
   def checkRoots(
     coeffs:          Seq[BigInt],
     rootsToCheck:    Seq[BigInt]  = Seq(1, 2, 3, 4).map(BigInt(_)),
@@ -19,20 +21,20 @@ object SWCheckRoots {
   ): Result = {
     def GF(v: BigInt) = new GFNumber(v, m, irreduciblePoly)
 
+    val n     = coeffs.length
     var corrupted = false
     val sVals = Array.fill(rootsToCheck.length)(BigInt(0))
-    val mat   = Array.tabulate(rootsToCheck.length, coeffs.length)((_, _) => BigInt(0))
+    val mat   = Array.tabulate(rootsToCheck.length, n)((_, _) => BigInt(0))
 
     for (idx <- rootsToCheck.indices) {
       val root = rootsToCheck(idx)
-      var sum  = coeffs(0)
-      mat(idx)(0) = BigInt(1)
-      var power = BigInt(1)
-      for (i <- 1 until coeffs.length) {
-        power        = GF(power).multiply(GF(root)).value  // r^i incrementally
-        mat(idx)(i)  = power
-        val product  = GF(power).multiply(GF(coeffs(i))).value
-        sum          = sum ^ product  // GF addition is XOR
+      var sum   = BigInt(0)
+      var power = BigInt(1)   // r^0 for j = n-1; multiplied by r each step
+      for (j <- (n - 1) to 0 by -1) {
+        mat(idx)(j)  = power
+        val product  = GF(power).multiply(GF(coeffs(j))).value
+        sum          = sum ^ product
+        power        = GF(power).multiply(GF(root)).value
       }
       sVals(idx) = sum
       if (sum != 0) corrupted = true

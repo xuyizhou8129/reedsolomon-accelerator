@@ -23,28 +23,51 @@ def try_solve(mat, s_vals, gf, combs):
     return None
 
 
+def encode(msg, gen, gf):
+    """Systematic RS encode: returns msg ++ parity (high-degree-first)."""
+    n_k = len(gen) - 1
+    shifted = msg + [0] * n_k
+    _, remainder = gf.polynomial_divide_coeffs(shifted, gen)
+    codeword = shifted[:]
+    for i, r in enumerate(remainder):
+        codeword[len(codeword) - len(remainder) + i] ^= r
+    return codeword
+
+
 def main():
     gf = GF2m(8, irreducible_poly=0b100011101)
     N = 15
     K = 11
-    coeffs = [80, 91, 235, 237, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2]
+    # Generator polynomial for RS(15,11): roots alpha^1..alpha^4 (high-degree-first)
+    gen = [1, 4, 7, 26, 24]
     roots_to_check = [1, 2, 3, 4]
+    max_corrupted = (N - K) // 2  # 2
 
-    # Check if the received word is corrupted
-    max_corrupted = (N - K) // 2  # max correctable errors
-    corrupted, s_vals, mat = check_roots(coeffs, roots_to_check, gf)
+    # Test 1: valid codeword — expect no corruption
+    msg = list(range(2, K + 2))
+    codeword = encode(msg, gen, gf)
+    print(f"Valid codeword: {codeword}")
+    corrupted, _, _ = check_roots(codeword, roots_to_check, gf)
+    print(f"Corrupted: {corrupted} (expected False)\n")
+
+    # Test 2: single-symbol error at position 3 — expect correction
+    received = codeword[:]
+    received[3] ^= 7
+    print(f"Received (1 error at pos 3): {received}")
+    corrupted, s_vals, mat = check_roots(received, roots_to_check, gf)
     if corrupted:
-        # Try 1 error, then 2 errors. comb = assumed error positions
         for num_errors in range(1, max_corrupted + 1):
             combs = comb_indices(N, num_errors)
             solution = try_solve(mat, s_vals, gf, combs)
             if solution is not None:
-                print(solution)
+                print(f"Error vector: {solution}")
+                corrected = [r ^ e for r, e in zip(received, solution)]
+                print(f"Corrected:    {corrected}")
+                print(f"Match original: {corrected == codeword}")
                 return
         print("No solution found")
     else:
-        print("No corrupted roots found")
-        return coeffs
+        print("No corruption detected")
 
 
 if __name__ == "__main__":

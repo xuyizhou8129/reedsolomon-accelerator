@@ -12,11 +12,11 @@ from GF_pure_python import GF2m  # noqa: E402
 #        roots_to_check: list of roots to check
 #        gf: Galois field to use
 # Output: True if all roots are roots of the polynomial, False otherwise
+# Convention: coeffs[0] is the highest-degree coefficient (matches SWModel.encode).
+# Evaluates P(r) = sum_j coeffs[j] * r^(n-1-j); mat[idx][j] = r^(n-1-j).
 
 
 def check_roots(coeffs, roots_to_check, gf=None):
-    # a + bx + cx^2 + ... + nx^(n-1)
-    # Default to GF(2^8) if not provided
     corrupted = False
     s_vals = [0] * len(roots_to_check)
     mat = []
@@ -24,18 +24,16 @@ def check_roots(coeffs, roots_to_check, gf=None):
         # x^8 + x^4 + x^3 + x + 1
         gf = GF2m(8, irreducible_poly=0b100011101)
 
-    # The first term is the constant term
+    n = len(coeffs)
     for index, root in enumerate(roots_to_check):
-        value = 0
-        row = [1]
-        sum = coeffs[0]
-        for i in range(1, len(coeffs)):
-            value = gf.power(root, i)
-            row.append(value)
-            value = gf.multiply(value, coeffs[i])
-            sum = gf.add(sum, value)
-        s_vals[index] = sum
+        row = []
+        sum_val = 0
+        for j in range(n):
+            power = gf.power(root, n - 1 - j)   # r^(n-1-j)
+            row.append(power)
+            sum_val = gf.add(sum_val, gf.multiply(coeffs[j], power))
+        s_vals[index] = sum_val
         mat.append(row)
-        if sum != 0:
+        if sum_val != 0:
             corrupted = True
     return corrupted, s_vals, mat

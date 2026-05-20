@@ -38,7 +38,7 @@ class CheckRoots(
     val done      = Output(Bool())
     val corrupted = Output(Bool())
 
-    // Polynomial coefficients: index 0 is the constant term.
+    // Polynomial coefficients: index 0 is the highest-degree coefficient (matches SWModel.encode).
     // Must be held stable from start until done.
     val coeffs = Input(Vec(numCoeffs, UInt(fieldSize.W)))
 
@@ -55,12 +55,11 @@ class CheckRoots(
 
   object S extends ChiselEnum {
     val sIdle,
-        sInitRoot,     // 1-cycle: set curPow=1, sval=coeffs[0], j=1
-        sWrM0,         // write 1 (= r^0) to M[i][0]
-        sPowS, sPowW,  // GFMul1: curPow = curPow * root[i]  (= r^j)
-        sWrMj,         // write curPow to M[i][j]
-        sMulS, sMulW,  // GFMul2: product = r^j * coeffs[j]
-        sAddS, sAddW,  // GFAdd:  sval ^= product; advance j
+        sInitRoot,     // 1-cycle: set curPow=1, sval=0, j=numCoeffs-1
+        sWrMj,         // write curPow (= r^(numCoeffs-1-j)) to M[i][j]
+        sMulS, sMulW,  // GFMul2: product = curPow * coeffs[j]
+        sAddS, sAddW,  // GFAdd:  sval ^= product; stop if j==0
+        sPowS, sPowW,  // GFMul1: curPow = curPow * root[i]; j--
         sWrS,          // write S[i] = sval
         sNextI,        // update corrupted flag; advance root index
         sDone = Value
@@ -115,45 +114,19 @@ class CheckRoots(
       }
     }
 
-    // One-cycle setup: initialise syndrome accumulator and power for root i.
-    // sval starts at coeffs[0] because coeffs[0] * r^0 = coeffs[0] * 1 = coeffs[0].
+    // One-cycle setup: initialise accumulator and starting power for root i.
+    // Iterates j from numCoeffs-1 down to 0; curPow = r^(numCoeffs-1-j).
+    // M[i][j] = r^(numCoeffs-1-j); sval = sum_j coeffs[j] * r^(numCoeffs-1-j).
     is(sInitRoot) {
       curPow  := 1.U
-      svalReg := io.coeffs(0)
-      jReg    := 1.U
-      state   := sWrM0
-      printf("(CheckRoots) root[%d]=%d init sval=coeffs[0]=%x\n",
-             iReg, rootsVec(iReg), io.coeffs(0))
+      svalReg := 0.U
+      jReg    := (numCoeffs - 1).U
+      state   := sWrMj
+      printf("(CheckRoots) root[%d]=%d init j=%d\n",
+             iReg, rootsVec(iReg), (numCoeffs - 1).U)
     }
 
-    // Write M[i][0] = 1 (= r^0)
-    is(sWrM0) {
-      io.memAddr  := addrMij(iReg, 0.U)
-      io.memWData := 1.U
-      io.memWrite := true.B
-      when(io.memReady) { state := sPowS }
-    }
-
-    // GFMul1: curPow = curPow * root[i]  (accumulates r^j after j iterations)
-    is(sPowS) {
-      when(gfMul1.io.in1.ready && gfMul1.io.in2.ready) {
-        gfMul1.io.in1.bits  := pz(curPow)
-        gfMul1.io.in1.valid := true.B
-        gfMul1.io.in2.bits  := rootsVec(iReg)
-        gfMul1.io.in2.valid := true.B
-        state               := sPowW
-      }
-    }
-
-    is(sPowW) {
-      when(gfMul1.io.out.valid) {
-        curPow := gfMul1.io.out.bits
-        state  := sWrMj
-        printf("(CheckRoots) root[%d] j=%d r^j=%x\n", iReg, jReg, gfMul1.io.out.bits)
-      }
-    }
-
-    // Write M[i][j] = curPow (= r^j)
+    // Write M[i][j] = curPow (= r^(numCoeffs-1-j))
     is(sWrMj) {
       io.memAddr  := addrMij(iReg, jReg)
       io.memWData := curPow
@@ -161,7 +134,7 @@ class CheckRoots(
       when(io.memReady) { state := sMulS }
     }
 
-    // GFMul2: product = r^j * coeffs[j]
+    // GFMul2: product = curPow * coeffs[j]
     is(sMulS) {
       when(gfMul2.io.in1.ready && gfMul2.io.in2.ready) {
         gfMul2.io.in1.bits  := pz(curPow)
@@ -179,7 +152,7 @@ class CheckRoots(
       }
     }
 
-    // GFAdd: sval ^= product; then advance j
+    // GFAdd: sval ^= product; stop when j==0, else go update power and decrement j
     is(sAddS) {
       when(gfAdd1.io.in1.ready && gfAdd1.io.in2.ready) {
         gfAdd1.io.in1.bits  := pz(svalReg)
@@ -193,13 +166,32 @@ class CheckRoots(
     is(sAddW) {
       when(gfAdd1.io.out.valid) {
         svalReg := gfAdd1.io.out.bits
-        val nextJ = jReg + 1.U
-        jReg := nextJ
-        when(nextJ >= numCoeffs.U) {
+        when(jReg === 0.U) {
           state := sWrS
         }.otherwise {
           state := sPowS
         }
+      }
+    }
+
+    // GFMul1: curPow = curPow * root[i]; then decrement j and write next M entry
+    is(sPowS) {
+      when(gfMul1.io.in1.ready && gfMul1.io.in2.ready) {
+        gfMul1.io.in1.bits  := pz(curPow)
+        gfMul1.io.in1.valid := true.B
+        gfMul1.io.in2.bits  := rootsVec(iReg)
+        gfMul1.io.in2.valid := true.B
+        state               := sPowW
+      }
+    }
+
+    is(sPowW) {
+      when(gfMul1.io.out.valid) {
+        curPow := gfMul1.io.out.bits
+        jReg   := jReg - 1.U
+        state  := sWrMj
+        printf("(CheckRoots) root[%d] j=%d->%d newPow=%x\n",
+               iReg, jReg, jReg - 1.U, gfMul1.io.out.bits)
       }
     }
 
