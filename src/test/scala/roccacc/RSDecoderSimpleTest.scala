@@ -153,20 +153,20 @@ class RSDecoderSimpleTest extends AnyFunSpec with ParallelTestExecution {
     //   runDecoderTest(codeword, "valid_codeword")
     // }
 
-    it("corrects a single-symbol error") {
-      val message  = (2 to 12).map(BigInt(_))
-      val received = SWModel.encode(message, n, k, fieldSize).toArray
-      received(3)  = received(3) ^ BigInt(7)
-      runDecoderTest(received.toSeq, "one_error_pos3")
-    }
-
-    // it("corrects two symbol errors") {
+    // it("corrects a single-symbol error") {
     //   val message  = (2 to 12).map(BigInt(_))
     //   val received = SWModel.encode(message, n, k, fieldSize).toArray
-    //   received(0)  = received(0) ^ BigInt(5)
-    //   received(11) = received(11) ^ BigInt(13)
-    //   runDecoderTest(received.toSeq, "two_errors_pos0_11")
+    //   received(3)  = received(3) ^ BigInt(7)
+    //   runDecoderTest(received.toSeq, "one_error_pos3")
     // }
+
+    it("corrects two symbol errors") {
+      val message  = (2 to 12).map(BigInt(_))
+      val received = SWModel.encode(message, n, k, fieldSize).toArray
+      received(0)  = received(0) ^ BigInt(5)
+      received(11) = received(11) ^ BigInt(13)
+      runDecoderTest(received.toSeq, "two_errors_pos0_11")
+    }
 
     // it("reports failure for three symbol errors (uncorrectable)") {
     //   val message  = (2 to 12).map(BigInt(_))
