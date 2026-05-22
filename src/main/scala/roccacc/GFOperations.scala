@@ -47,60 +47,19 @@ class GFReduce(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module 
     val in1 = Flipped(Decoupled(UInt((2 * fieldSize).W)))
     val out = Valid(UInt(fieldSize.W))
   })
-  object ReducerState extends ChiselEnum {
-    val idle, computing, done = Value
+
+  // Build the Mastrovito reduction matrix once at elaboration; wire up combinational XOR network
+  private val reductionMatrix = GFReduceGen.buildReductionMatrix(fieldSize, GFReduceGen.GF256_POLY)
+
+  val outBits = Wire(Vec(fieldSize, Bool()))
+  // unroll the reduction matrix
+  for (j <- 0 until fieldSize) {
+    outBits(j) := reductionMatrix(j).map(i => io.in1.bits(i)).reduce(_ ^ _)
   }
 
-  val reduce_state = RegInit(ReducerState.idle)
-  val reduce_result = RegInit(0.U((fieldSize).W))
-  val reduce_temp_poly = RegInit(0.U((2 * fieldSize).W))
-  val reduce_irreducible = "b100011101".U
-  io.in1.ready := reduce_state === ReducerState.idle
-  io.out.bits := 8.U((fieldSize).W)
-  io.out.valid := false.B
-  
-  switch(reduce_state) {
-  is(ReducerState.idle) { // IDLE
-    io.out.valid := false.B
-    io.out.bits := 8.U((fieldSize).W)
-    when(io.in1.valid) {
-      reduce_state := ReducerState.computing
-      reduce_temp_poly := io.in1.bits
-      printf("(Reduction) reduce called, Reducing %b with irreducible %x\n", io.in1.bits, reduce_irreducible)
-    }
-  }
-  
-is(ReducerState.computing) { // COMPUTING
-    printf("(Reduction) in computing state, reducing %b\n", reduce_temp_poly)
-    when(reduce_temp_poly === 0.U) {
-        reduce_result := 0.U
-        printf("(Reduction) reduced to 0, returning 0\n")
-        reduce_state := ReducerState.done
-    }.otherwise {
-        // Find the position of the highest set bit
-        val msb = PriorityEncoder(Reverse(reduce_temp_poly))
-        val polyWidth = (fieldSize * 2).U
-        val actualMsb = polyWidth - 1.U - msb  // Convert to actual MSB position
-        
-        when(actualMsb < fieldSize.U) {
-            // Already reduced
-            reduce_result := reduce_temp_poly(fieldSize - 1, 0)
-            reduce_state := ReducerState.done
-        }.otherwise {
-            // Need to reduce
-            val shiftAmount = actualMsb - fieldSize.U
-            reduce_temp_poly := reduce_temp_poly ^ (reduce_irreducible << shiftAmount)
-            // Stay in COMPUTING
-        }
-    }
-}
-is(ReducerState.done) { // DONE
-    printf("(Reduction) done, returning %b\n", reduce_result)
-    reduce_state := ReducerState.idle
-    io.out.valid := true.B
-    io.out.bits := reduce_result
-    }
-  }
+  io.in1.ready := true.B
+  io.out.valid := io.in1.valid
+  io.out.bits   := outBits.asUInt
 }
 
 class GFAdd(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
@@ -165,13 +124,11 @@ is(AdderState.computing) { // COMPUTING
     printf("(Addition)reducer1 done, returning %b\n", reducer1.io.out.bits)
     reduced1 := reducer1.io.out.bits
     reducer1_done := true.B
-    reducer1.io.in1.valid := false.B
   }
   when(reducer2.io.out.valid) {
     printf("(Addition)reducer2 done, returning %b\n", reducer2.io.out.bits)
     reduced2 := reducer2.io.out.bits
     reducer2_done := true.B
-    reducer2.io.in1.valid := false.B
   }
     when(reducer1_done && reducer2_done) {
         printf("(Addition) reducers done, adding %b and %b\n", reduced1, reduced2)
@@ -265,13 +222,11 @@ is(MulState.reduction) { // REDUCTION
     printf("(Multiplication)reducer1 done, returning %b\n", reducer1.io.out.bits)
     reduced1 := reducer1.io.out.bits
     reducer1_done := true.B
-    reducer1.io.in1.valid := false.B
   }
   when(reducer2.io.out.valid) {
     printf("(Multiplication)reducer2 done, returning %b\n", reducer2.io.out.bits)
     reduced2 := reducer2.io.out.bits
     reducer2_done := true.B
-    reducer2.io.in1.valid := false.B
   }
     when(reducer1_done && reducer2_done) {
         printf("(Multiplication) reducers done, multiplying %b and %b\n", reduced1, reduced2)
@@ -299,7 +254,6 @@ is(MulState.r_reduction){
   when(reducer3.io.out.valid) {
     printf("(Multiplication)reducer3 done, returning %b\n", reducer3.io.out.bits)
     mul_result := reducer3.io.out.bits
-    reducer3.io.in1.valid := false.B
     mul_state := MulState.done
   }
 }
