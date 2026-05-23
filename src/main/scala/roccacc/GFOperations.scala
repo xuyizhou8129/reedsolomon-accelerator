@@ -63,92 +63,36 @@ class GFReduce(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module 
 }
 
 class GFAdd(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
-    val io = IO(new Bundle {
+  val io = IO(new Bundle {
     val in1 = Flipped(Decoupled(UInt((2 * fieldSize).W)))
     val in2 = Flipped(Decoupled(UInt((2 * fieldSize).W)))
     val out = Valid(UInt(fieldSize.W))
   })
-  object AdderState extends ChiselEnum {
-    val idle, computing, done = Value
-  }
-  val adder_state = RegInit(AdderState.idle)
-  val adder_result = RegInit(0.U((fieldSize).W))
-  val reducer1_done = RegInit(false.B)
-  val reducer2_done = RegInit(false.B)
-  val reducer1_sent = RegInit(false.B)
-  val reducer2_sent = RegInit(false.B)
-  val reduced1 = RegInit(0.U((2 * fieldSize).W))
-  val reduced2 = RegInit(0.U((2 * fieldSize).W))
-  io.in1.ready := adder_state === AdderState.idle
-  io.in2.ready := adder_state === AdderState.idle
-  io.out.bits := 0.U((fieldSize).W)
-  io.out.valid := false.B
+
+  // Both inputs are reduced combinationally; the XOR is latched on the next clock edge.
+  // This gives a 1-cycle latency that matches the Send/Wait (sAddS/sAddW) caller pattern.
   val reducer1 = Module(new GFReduce(fieldSize))
   val reducer2 = Module(new GFReduce(fieldSize))
-  reducer1.io.in1.bits := 0.U((2 * fieldSize).W)
-  reducer1.io.in1.valid := false.B
-  reducer2.io.in1.bits := 0.U((2 * fieldSize).W)
-  reducer2.io.in1.valid := false.B
-  val storedinput1 = RegInit(0.U((2 * fieldSize).W))
-  val storedinput2 = RegInit(0.U((2 * fieldSize).W))
 
-  switch(adder_state) {
-  is(AdderState.idle) { // IDLE
-    printf("(Addition) in idle state, waiting for inputs\n")
-    reducer1_sent := false.B
-    reducer2_sent := false.B
-    reducer1_done := false.B
-    reducer2_done := false.B
-    adder_result := 0.U((fieldSize).W)
-    io.out.valid := false.B
-    io.out.bits := 0.U((fieldSize).W)
-    when(io.in1.valid && io.in2.valid) {
-      adder_state := AdderState.computing
-      storedinput1 := io.in1.bits
-      storedinput2 := io.in2.bits
-    }
+  reducer1.io.in1.bits  := io.in1.bits
+  reducer1.io.in1.valid := io.in1.valid
+  reducer2.io.in1.bits  := io.in2.bits
+  reducer2.io.in1.valid := io.in2.valid
+
+  val result_reg = RegInit(0.U(fieldSize.W))
+  val valid_reg  = RegInit(false.B)
+
+  when(io.in1.valid && io.in2.valid) {
+    result_reg := reducer1.io.out.bits ^ reducer2.io.out.bits
+    valid_reg  := true.B
+  }.otherwise {
+    valid_reg := false.B
   }
-is(AdderState.computing) { // COMPUTING
-    printf("(Addition) in computing state, reducing inputs\n")
-    when(!reducer1_sent) {
-  reducer1.io.in1.bits := storedinput1
-    reducer1.io.in1.valid := true.B
-    reducer1_sent := true.B
-  }
-  when(!reducer2_sent) {
-    reducer2.io.in1.bits := storedinput2
-    reducer2.io.in1.valid := true.B
-    reducer2_sent := true.B
-  }
-  when(reducer1.io.out.valid) {
-    printf("(Addition)reducer1 done, returning %b\n", reducer1.io.out.bits)
-    reduced1 := reducer1.io.out.bits
-    reducer1_done := true.B
-  }
-  when(reducer2.io.out.valid) {
-    printf("(Addition)reducer2 done, returning %b\n", reducer2.io.out.bits)
-    reduced2 := reducer2.io.out.bits
-    reducer2_done := true.B
-  }
-    when(reducer1_done && reducer2_done) {
-        printf("(Addition) reducers done, adding %b and %b\n", reduced1, reduced2)
-        adder_result := reduced1 ^ reduced2
-        reducer1.io.in1.valid := false.B
-        reducer2.io.in1.valid := false.B
-        adder_state := AdderState.done
-    }
-}
-is(AdderState.done) { // DONE
-    printf("(Addition) done, returning %b\n", adder_result)
-    reducer1.io.in1.bits := 0.U((2 * fieldSize).W)
-    reducer2.io.in1.bits := 0.U((2 * fieldSize).W)
-    io.out.valid := true.B
-    io.out.bits := adder_result
-    adder_state := AdderState.idle
-    reduced1 := 0.U((2 * fieldSize).W)
-    reduced2 := 0.U((2 * fieldSize).W)
-    }
-  }
+
+  io.in1.ready := true.B
+  io.in2.ready := true.B
+  io.out.valid := valid_reg
+  io.out.bits  := result_reg
 }
 
 class GFMul(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
