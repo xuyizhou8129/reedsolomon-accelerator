@@ -1,13 +1,15 @@
 package roccacc
+
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import chisel3._
-import chisel3.simulator.{PeekPokeAPI, SingleBackendSimulator}
+import chisel3.simulator.{CycleCountingAPI, SingleBackendSimulator}
+import chisel3.simulator.Simulator.{SimulationDigest, CompilationFailed}
 import svsim.{CommonCompilationSettings, verilator}
 
-object CustomVerilatorSim extends PeekPokeAPI {
+object CustomVerilatorSim extends CycleCountingAPI {
 
   def simulate[T <: RawModule](
       module: => T,
@@ -15,14 +17,34 @@ object CustomVerilatorSim extends PeekPokeAPI {
       enableWaves: Boolean = false,
       testName: Option[String] = None
   )(body: (T) => Unit): Unit = {
+    _cycleCount.set(0L)
     val simulator = makeSimulator(buildDir, enableWaves, testName)
-    simulator.simulate(module) { module =>
-        module.controller.setTraceEnabled(enableWaves)
-        body(module.wrapped)
-      }
-      .result
 
-      //simulator.cleanup()
+    // Retain the full BackendInvocationDigest from Simulator.scala so we can
+    // read compilationEndTime and the SimulationDigest timestamps.
+    val digest = simulator.simulate(module) { m =>
+      m.controller.setTraceEnabled(enableWaves)
+      body(m.wrapped)
+    }
+
+    val totalCycles = _cycleCount.get()
+    val compileMs   = (digest.compilationEndTime - digest.compilationStartTime) / 1_000_000L
+
+    digest.outcome match {
+      case SimulationDigest(simStart, simEnd, outcome) =>
+        val simMs      = (simEnd - simStart) / 1_000_000L
+        val throughput = if (simMs > 0) f"${totalCycles * 1000L / simMs}%,d cyc/s" else "N/A"
+        println(
+          s"[CycleCount] compile=${compileMs}ms  " +
+          s"sim=${simMs}ms  " +
+          s"cycles=${totalCycles}  " +
+          s"throughput=${throughput}"
+        )
+        outcome.get   // re-raise any simulation exception
+      case CompilationFailed(error) =>
+        println(s"[CycleCount] compilation failed after ${compileMs}ms")
+        throw error
+    }
   }
 
   private class DefaultSimulator(
@@ -43,31 +65,22 @@ object CustomVerilatorSim extends PeekPokeAPI {
       }
     }
   }
+
   private def makeSimulator(
       buildDir: String,
       enableWaves: Boolean,
       testName: Option[String]
   ): DefaultSimulator = {
     val className = getClass.getName.stripSuffix("$")
-    
-    // Use test name if provided, otherwise use a generic name
     val namePart = testName match {
-      case Some(name) => 
-        // Sanitize test name for filesystem: replace spaces and special chars with underscores
-        name.replaceAll("[^a-zA-Z0-9]", "_").toLowerCase
-      case None =>
-        // Fall back to generic name if test name not provided
-        "test"
+      case Some(name) => name.replaceAll("[^a-zA-Z0-9]", "_").toLowerCase
+      case None       => "test"
     }
-    
-    // Add a date/time suffix to ensure uniqueness for parallel test runs
     val dateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS")
     val uniqueId = LocalDateTime.now().format(dateTimeFormatter)
     val workspacePath = Seq(buildDir, className, s"${namePart}_${uniqueId}").mkString("/")
     val workspaceDir = Paths.get(os.pwd.toString, workspacePath)
-    // Ensure the workspace directory exists
     Files.createDirectories(workspaceDir)
     new DefaultSimulator(workspaceDir.toString(), enableWaves)
   }
-
 }
