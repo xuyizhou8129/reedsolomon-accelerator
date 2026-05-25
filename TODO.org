@@ -19,8 +19,10 @@ https://en.wikipedia.org/wiki/Advanced_Encryption_Standard
 
 - Currently the Coordinator Still cant handle more than two error (logic to create combinations)
 - Optimize the basic operations library:
-GFMul
-GFInv
-GFReduction
+GFPower
+GFDiv
+- The current Matrix Port is not correct, need to be fixed, (currently scratchpad is initalized in tb only)
+- Use banks
+
 
 
