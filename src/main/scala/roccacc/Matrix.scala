@@ -2,26 +2,26 @@ package roccacc
 
 import chisel3._
 import chisel3.util._
-import org.chipsalliance.cde.config.Parameters
-import freechips.rocketchip.tile.CoreModule
 
-//Creating a matrix module to store the matrix in the register
-//The matrix is stored in a vector of vectors of UInts
-//There is a one cycle delay between the input and output
-//No handshake protocol is used, the input is a matrix and the output is a matrix
-class Matrix(rows: Int, cols: Int) extends Module {
+// Scratchpad memory for the RS decoder pipeline.
+// Implements the same single-word port protocol used by MatSolve and CheckRoots:
+// memReady is always asserted; read data is available combinationally in the same
+// cycle as memRead (combinational read, registered write).
+class Matrix(size: Int, addrWidth: Int = 32, dataWidth: Int = 8) extends Module {
   val io = IO(new Bundle {
-    val in = Input(Vec(rows, Vec(cols, UInt(8.W)))) // Input matrix is a vector of vectors of UInts
-    val out = Output(Vec(rows, Vec(cols, UInt(8.W)))) // Output matrix is a vector of vectors of UInts
+    val memAddr  = Input(UInt(addrWidth.W))
+    val memWData = Input(UInt(dataWidth.W))
+    val memRData = Output(UInt(dataWidth.W))
+    val memRead  = Input(Bool())
+    val memWrite = Input(Bool())
+    val memReady = Output(Bool())
   })
-  
-  val matrix = RegInit(VecInit(Seq.fill(rows)(VecInit(Seq.fill(cols)(0.U(8.W))))))
-  
-  for (i <- 0 until rows) {
-    for (j <- 0 until cols) {
-      matrix(i)(j) := io.in(i)(j) //copy the input matrix to the matrix register
-    }
+
+  val storage = RegInit(VecInit(Seq.fill(size)(0.U(dataWidth.W))))
+
+  io.memReady := true.B
+  io.memRData := Mux(io.memRead, storage(io.memAddr), 0.U)
+  when(io.memWrite) {
+    storage(io.memAddr) := io.memWData
   }
-  
-  io.out := matrix //The output is a matrix
 }

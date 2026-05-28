@@ -20,21 +20,6 @@ class RSDecoderSimpleTest extends AnyFunSpec with ParallelTestExecution {
   val roots     = Seq(1, 2, 3, 4)
   val numRoots  = roots.length
 
-  // Compact memory layout (one GF element per word):
-  //   baseM        : Vandermonde M (numRoots × n = 60 words) — CheckRoots output, read-only
-  //   baseS        : syndrome S (numRoots = 4 words)          — CheckRoots output, master copy
-  //   baseAcompact : compact trial A (numRoots × t = 8 words) — gather phase
-  //   baseB        : b copy (numRoots = 4 words)              — restored before each MatSolve
-  //   baseXbuf     : compact x (t = 2 words)                  — MatSolve output
-  //   baseX        : full error vector (n = 15 words)         — scattered after success
-  val baseM        = 0
-  val baseS        = numRoots * n                  // 60
-  val baseAcompact = baseS + numRoots              // 64
-  val baseB        = baseAcompact + numRoots * t   // 72
-  val baseXbuf     = baseB + numRoots              // 76
-  val baseX        = baseXbuf + t                  // 78
-  val memSize      = baseX + n                     // 93
-
   implicit val p: Parameters = new Config((site, here, up) => {
     case TileKey => new TileParams {
       val core              = RocketCoreParams(nPMPs = 0)
@@ -57,27 +42,17 @@ class RSDecoderSimpleTest extends AnyFunSpec with ParallelTestExecution {
     if (sw.solved)
       println(s"[$testName] SW errorVec = ${sw.errorVec.mkString(", ")}")
 
-    val mem = Array.fill(memSize)(BigInt(0))
-
     simulate(
       new Coordinator(n, k, roots),
-      buildDir  = "build",
+      buildDir    = "build",
       enableWaves = true,
-      testName  = Some(testName)
+      testName    = Some(testName)
     ) { dut =>
 
       // Poke received coefficients (held stable throughout)
       for (j <- 0 until n)
         dut.io.coeffs(j).poke(received(j).U(fieldSize.W))
 
-      dut.io.baseM.poke(baseM.U)
-      dut.io.baseS.poke(baseS.U)
-      dut.io.baseAcompact.poke(baseAcompact.U)
-      dut.io.baseB.poke(baseB.U)
-      dut.io.baseXbuf.poke(baseXbuf.U)
-      dut.io.baseX.poke(baseX.U)
-      dut.io.memReady.poke(true.B)
-      dut.io.memRData.poke(0.U)
       dut.io.start.poke(false.B)
       dut.clock.step(2)
 
@@ -86,28 +61,12 @@ class RSDecoderSimpleTest extends AnyFunSpec with ParallelTestExecution {
       dut.clock.step(1)
       dut.io.start.poke(false.B)
 
-      // Drive the memory interface until done fires.
+      // Run until done fires (internal scratchpad is driven by Coordinator)
       var isDone    = false
       var cycles    = 0
       val maxCycles = 20000000
 
       while (!isDone && cycles < maxCycles) {
-        val addr = dut.io.memAddr.peek().litValue.toInt
-
-        if (dut.io.memRead.peek().litToBoolean) {
-          require(addr >= 0 && addr < memSize,
-            s"[$testName] read addr $addr out of range [0,$memSize)")
-          dut.io.memRData.poke(mem(addr).U(fieldSize.W))
-        } else {
-          dut.io.memRData.poke(0.U)
-        }
-
-        if (dut.io.memWrite.peek().litToBoolean) {
-          require(addr >= 0 && addr < memSize,
-            s"[$testName] write addr $addr out of range [0,$memSize)")
-          mem(addr) = dut.io.memWData.peek().litValue
-        }
-
         if (dut.io.done.peek().litToBoolean) {
           isDone = true
         } else {
@@ -129,11 +88,11 @@ class RSDecoderSimpleTest extends AnyFunSpec with ParallelTestExecution {
       assert(hwSolved == sw.solved,
         s"[$testName] solved mismatch: HW=$hwSolved SW=${sw.solved}")
 
-      // When solved, compare the error vector scattered to baseX by Coordinator
+      // When solved, compare the error vector from io.errorVec
       if (sw.solved) {
-        println(s"[$testName] Checking error vector x at baseX=$baseX:")
+        println(s"[$testName] Checking error vector:")
         for (j <- 0 until n) {
-          val hwX = mem(baseX + j)
+          val hwX = dut.io.errorVec(j).peek().litValue
           val swX = sw.errorVec(j)
           println(s"  x[$j]: HW=$hwX  SW=$swX")
           assert(hwX == swX,
