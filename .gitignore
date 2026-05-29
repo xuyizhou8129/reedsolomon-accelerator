@@ -35,6 +35,8 @@ docs/gfop_algorithms.md
 docs/al_gfreduce.md
 docs/gf_ops.md
 docs/al_gfmul.md
+docs/al_gfsquare.md
+docs/al_gfpower.md
 
 # Cluade skills
 .claude/

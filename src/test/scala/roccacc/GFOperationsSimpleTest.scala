@@ -176,4 +176,37 @@ class GFOperationsSimpleTest extends AnyFunSpec with ParallelTestExecution {
       }
     }
   }
+
+  describe("GFSquare") {
+    it("performs GF Squaring") {
+      simulate(new GFSquare(fieldSize), buildDir = "build", enableWaves = true, testName = Some("performs_GF_Squaring")) { dut =>
+        // 0x02^2 = 0x04 (no reduction needed)
+        dut.io.in1.valid.poke(true.B)
+        dut.io.in1.bits.poke("b10".U)
+        dut.clock.stepUntil(dut.io.out.valid, 1, 50)
+        dut.io.out.bits.expect("b100".U)
+        dut.io.out.valid.expect(true.B)
+
+        dut.io.in1.valid.poke(false.B)
+        dut.clock.step(3)
+
+        // 0x10^2 = 0x1D (x^4 squared = x^8 mod p(x) = x^4+x^3+x^2+1)
+        dut.io.in1.valid.poke(true.B)
+        dut.io.in1.bits.poke("b10000".U)
+        dut.clock.stepUntil(dut.io.out.valid, 1, 50)
+        dut.io.out.bits.expect("b11101".U)
+        dut.io.out.valid.expect(true.B)
+
+        dut.io.in1.valid.poke(false.B)
+        dut.clock.step(3)
+
+        // 0x3A^2 = 0x2D (matches GFMul(0x3A, 0x3A) and GFPower(0x3A, 2))
+        dut.io.in1.valid.poke(true.B)
+        dut.io.in1.bits.poke("b111010".U)
+        dut.clock.stepUntil(dut.io.out.valid, 1, 50)
+        dut.io.out.bits.expect("b101101".U)
+        dut.io.out.valid.expect(true.B)
+      }
+    }
+  }
 }

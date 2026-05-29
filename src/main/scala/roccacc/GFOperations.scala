@@ -154,69 +154,84 @@ class GFPower(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
   })
 
   object PowerState extends ChiselEnum {
-    val idle, computing, done = Value
+    val idle, testBit, mulIssue, mulWait, squareIssue, squareWait, done = Value
   }
 
-  val power_state      = RegInit(PowerState.idle)
-  val load_inputs_done = RegInit(false.B)
-  val acc_val          = RegInit(1.U(fieldSize.W))
-  val acc_count        = RegInit(0.U((2 * fieldSize).W))
-  val storedinput1     = RegInit(0.U((2 * fieldSize).W))
-  val storedinput2     = RegInit(0.U((2 * fieldSize).W))
+  val power_state = RegInit(PowerState.idle)
+  val accReg      = RegInit(1.U(fieldSize.W))
+  val powReg      = RegInit(0.U(fieldSize.W))
+  val expReg      = RegInit(0.U(fieldSize.W))
 
-  val multiplier1 = Module(new GFMul(fieldSize))
+  val inReducer  = Module(new GFReduce(fieldSize))
+  val multiplier = Module(new GFMul(fieldSize))
+  val squarer    = Module(new GFSquare(fieldSize))
 
   // --- Datapath (outside FSM) ---
-  multiplier1.io.in1.bits  := 0.U((2 * fieldSize).W)
-  multiplier1.io.in1.valid := false.B
-  multiplier1.io.in2.bits  := 0.U((2 * fieldSize).W)
-  multiplier1.io.in2.valid := false.B
+  inReducer.io.in1.bits  := io.in1.bits
+  inReducer.io.in1.valid := false.B
+
+  // accReg/powReg are the fixed operand sources; Chisel zero-extends to the 16-bit port
+  multiplier.io.in1.bits  := accReg
+  multiplier.io.in1.valid := false.B
+  multiplier.io.in2.bits  := powReg
+  multiplier.io.in2.valid := false.B
+
+  squarer.io.in1.bits  := powReg
+  squarer.io.in1.valid := false.B
 
   io.in1.ready := power_state === PowerState.idle
   io.in2.ready := power_state === PowerState.idle
   io.out.valid := power_state === PowerState.done
-  io.out.bits  := acc_val
+  io.out.bits  := accReg
 
   // --- Control (inside FSM) ---
   switch(power_state) {
     is(PowerState.idle) {
-      load_inputs_done := false.B
       when(io.in1.valid && io.in2.valid) {
-        power_state  := PowerState.computing
-        storedinput1 := io.in1.bits
-        storedinput2 := io.in2.bits
+        inReducer.io.in1.valid := true.B
+        accReg      := 1.U(fieldSize.W)
+        powReg      := inReducer.io.out.bits
+        expReg      := io.in2.bits(fieldSize - 1, 0)
+        power_state := PowerState.testBit
       }
     }
-    is(PowerState.computing) {
-      when(!load_inputs_done && multiplier1.io.in1.ready && multiplier1.io.in2.ready) {
-        multiplier1.io.in1.bits  := storedinput1
-        multiplier1.io.in1.valid := true.B
-        multiplier1.io.in2.bits  := storedinput1
-        multiplier1.io.in2.valid := true.B
-        load_inputs_done := true.B
-        acc_val          := 1.U(fieldSize.W)
-        acc_count        := 2.U((2 * fieldSize).W)
-      }.elsewhen(load_inputs_done && multiplier1.io.in1.ready && multiplier1.io.in2.ready) {
-        multiplier1.io.in1.bits  := storedinput1
-        multiplier1.io.in1.valid := true.B
-        multiplier1.io.in2.bits  := acc_val
-        multiplier1.io.in2.valid := true.B
-      }
-      when(acc_count < storedinput2 && multiplier1.io.out.valid) {
-        acc_val   := multiplier1.io.out.bits
-        acc_count := acc_count + 1.U
-      }.elsewhen(multiplier1.io.out.valid) {
-        acc_val     := multiplier1.io.out.bits
+    is(PowerState.testBit) {
+      when(expReg === 0.U) {
         power_state := PowerState.done
+      }.elsewhen(expReg(0)) {
+        power_state := PowerState.mulIssue
+      }.otherwise {
+        power_state := PowerState.squareIssue
+      }
+    }
+    is(PowerState.mulIssue) {
+      when(multiplier.io.in1.ready && multiplier.io.in2.ready) {
+        multiplier.io.in1.valid := true.B
+        multiplier.io.in2.valid := true.B
+        power_state := PowerState.mulWait
+      }
+    }
+    is(PowerState.mulWait) {
+      when(multiplier.io.out.valid) {
+        accReg      := multiplier.io.out.bits
+        power_state := PowerState.squareIssue
+      }
+    }
+    is(PowerState.squareIssue) {
+      when(squarer.io.in1.ready) {
+        squarer.io.in1.valid := true.B
+        power_state := PowerState.squareWait
+      }
+    }
+    is(PowerState.squareWait) {
+      when(squarer.io.out.valid) {
+        powReg      := squarer.io.out.bits
+        expReg      := expReg >> 1
+        power_state := PowerState.testBit
       }
     }
     is(PowerState.done) {
-      power_state      := PowerState.idle
-      acc_val          := 0.U(fieldSize.W)
-      acc_count        := 0.U((2 * fieldSize).W)
-      load_inputs_done := false.B
-      storedinput1     := 0.U((2 * fieldSize).W)
-      storedinput2     := 0.U((2 * fieldSize).W)
+      power_state := PowerState.idle
     }
   }
 }
@@ -296,6 +311,61 @@ class GFDiv(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
       div_result   := 0.U(fieldSize.W)
       storedinput1 := 0.U((2 * fieldSize).W)
       storedinput2 := 0.U((2 * fieldSize).W)
+    }
+  }
+}
+
+class GFSquare(fieldSize: Int = GFOperations.DEFAULT_FIELD_SIZE) extends Module {
+  val io = IO(new Bundle {
+    val in1 = Flipped(Decoupled(UInt((2 * fieldSize).W)))
+    val out  = Valid(UInt(fieldSize.W))
+  })
+
+  object SquareState extends ChiselEnum {
+    val idle, expand, done = Value
+  }
+
+  val sq_state = RegInit(SquareState.idle)
+  val aReg     = RegInit(0.U(fieldSize.W))
+  val wideReg  = RegInit(0.U((2 * fieldSize).W))
+
+  val inReducer  = Module(new GFReduce(fieldSize))
+  val outReducer = Module(new GFReduce(fieldSize))
+
+  // --- Datapath (outside FSM) ---
+  inReducer.io.in1.bits  := io.in1.bits
+  inReducer.io.in1.valid := false.B
+
+  // Expand-even: a[i] → wide[2*i], odd bits = 0
+  val wideBits = Wire(Vec(2 * fieldSize, Bool()))
+  for (i <- 0 until 2 * fieldSize) {
+    if (i % 2 == 0) wideBits(i) := aReg(i / 2)
+    else            wideBits(i) := false.B
+  }
+  val wide = wideBits.asUInt
+
+  outReducer.io.in1.bits  := wideReg
+  outReducer.io.in1.valid := sq_state === SquareState.done
+
+  io.in1.ready := sq_state === SquareState.idle
+  io.out.valid := sq_state === SquareState.done
+  io.out.bits  := outReducer.io.out.bits
+
+  // --- Control (inside FSM) ---
+  switch(sq_state) {
+    is(SquareState.idle) {
+      when(io.in1.valid) {
+        inReducer.io.in1.valid := true.B
+        aReg     := inReducer.io.out.bits
+        sq_state := SquareState.expand
+      }
+    }
+    is(SquareState.expand) {
+      wideReg  := wide
+      sq_state := SquareState.done
+    }
+    is(SquareState.done) {
+      sq_state := SquareState.idle
     }
   }
 }
