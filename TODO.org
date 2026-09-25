@@ -24,5 +24,8 @@ GFDiv
 - The current Matrix Port is not correct, need to be fixed, (currently scratchpad is initalized in tb only)
 - Use banks
 
+- Test it at CPU level
+- Banking and paralellism
+
 
 

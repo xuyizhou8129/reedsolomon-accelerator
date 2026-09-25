@@ -106,18 +106,18 @@ class RSDecoderSimpleTest extends AnyFunSpec with ParallelTestExecution {
 
   describe("Coordinator HW tested against SWDecoder golden model") {
 
-    // it("passes a valid RS(15,11) codeword without correction") {
-    //   val message  = (2 to 12).map(BigInt(_))
-    //   val codeword = SWModel.encode(message, n, k, fieldSize)
-    //   runDecoderTest(codeword, "valid_codeword")
-    // }
+    it("passes a valid RS(15,11) codeword without correction") {
+      val message  = (2 to 12).map(BigInt(_))
+      val codeword = SWModel.encode(message, n, k, fieldSize)
+      runDecoderTest(codeword, "valid_codeword")
+    }
 
-    // it("corrects a single-symbol error") {
-    //   val message  = (2 to 12).map(BigInt(_))
-    //   val received = SWModel.encode(message, n, k, fieldSize).toArray
-    //   received(3)  = received(3) ^ BigInt(7)
-    //   runDecoderTest(received.toSeq, "one_error_pos3")
-    // }
+    it("corrects a single-symbol error") {
+      val message  = (2 to 12).map(BigInt(_))
+      val received = SWModel.encode(message, n, k, fieldSize).toArray
+      received(3)  = received(3) ^ BigInt(7)
+      runDecoderTest(received.toSeq, "one_error_pos3")
+    }
 
     it("corrects two symbol errors") {
       val message  = (2 to 12).map(BigInt(_))
@@ -127,13 +127,13 @@ class RSDecoderSimpleTest extends AnyFunSpec with ParallelTestExecution {
       runDecoderTest(received.toSeq, "two_errors_pos0_11")
     }
 
-    // it("reports failure for three symbol errors (uncorrectable)") {
-    //   val message  = (2 to 12).map(BigInt(_))
-    //   val received = SWModel.encode(message, n, k, fieldSize).toArray
-    //   received(0)  = received(0)  ^ BigInt(1)
-    //   received(5)  = received(5)  ^ BigInt(2)
-    //   received(10) = received(10) ^ BigInt(3)
-    //   runDecoderTest(received.toSeq, "three_errors_uncorrectable")
-    // }
+    it("reports failure for three symbol errors (uncorrectable)") {
+      val message  = (2 to 12).map(BigInt(_))
+      val received = SWModel.encode(message, n, k, fieldSize).toArray
+      received(0)  = received(0)  ^ BigInt(1)
+      received(5)  = received(5)  ^ BigInt(2)
+      received(10) = received(10) ^ BigInt(3)
+      runDecoderTest(received.toSeq, "three_errors_uncorrectable")
+    }
   }
 }
