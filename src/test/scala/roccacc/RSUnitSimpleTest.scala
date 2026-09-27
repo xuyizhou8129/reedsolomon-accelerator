@@ -5,6 +5,27 @@ import chisel3.util._
 import CustomVerilatorSim._
 import org.scalatest.funspec.AnyFunSpec
 
+/* How to run this test
+ *
+ * From the Chipyard root (accelerator/), inside the nix shell. The nix shell
+ * is required: the system Verilator is too old for the svsim test driver.
+ *
+ *   cd /pool/xuyi/reed-solomon_fec/chipyardfork/accelerator
+ *   nix develop
+ *   sbt "roccacc/testOnly roccacc.RSUnitSimpleTest"
+ *
+ * Run a single case by matching a substring of its name with -z
+ * (one RSUnit case; other cases: encodes a message, decodes a two-error):
+ *
+ *   sbt "roccacc/testOnly roccacc.RSUnitSimpleTest -- -z \"back to back\""
+ *
+ * The first run compiles rocket-chip and is slow. For repeated runs, start
+ * `sbt` once and type the testOnly command at its prompt.
+ *
+ * Each case writes a VCD into build/ under the rocc-acc project, in a
+ * directory named after the testName passed to simulate().
+ */
+
 /** Checks that RSUnit steers start/done correctly to the encoder and the
   * decoder and latches their results. The RS math itself is covered by
   * RSEncoderSimpleTest and RSDecoderSimpleTest. */

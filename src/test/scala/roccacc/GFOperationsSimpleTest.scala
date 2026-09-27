@@ -11,6 +11,27 @@ import freechips.rocketchip.tile.TileParams
 import org.chipsalliance.cde.config.Config
 import freechips.rocketchip.rocket.RocketCoreParams
 
+/* How to run this test
+ *
+ * From the Chipyard root (accelerator/), inside the nix shell. The nix shell
+ * is required: the system Verilator is too old for the svsim test driver.
+ *
+ *   cd /pool/xuyi/reed-solomon_fec/chipyardfork/accelerator
+ *   nix develop
+ *   sbt "roccacc/testOnly roccacc.GFOperationsSimpleTest"
+ *
+ * Run a single case by matching a substring of its name with -z
+ * (one GF operator; other describe blocks: GFReduce, GFAdd, GFPower, GFDiv, GFSquare):
+ *
+ *   sbt "roccacc/testOnly roccacc.GFOperationsSimpleTest -- -z \"GFMul\""
+ *
+ * The first run compiles rocket-chip and is slow. For repeated runs, start
+ * `sbt` once and type the testOnly command at its prompt.
+ *
+ * Each case writes a VCD into build/ under the rocc-acc project, in a
+ * directory named after the testName passed to simulate().
+ */
+
 class GFOperationsSimpleTest extends AnyFunSpec with ParallelTestExecution {
 
   val fieldSize = 8
