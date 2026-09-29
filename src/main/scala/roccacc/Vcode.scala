@@ -72,7 +72,7 @@ class RoccAccImp(outer: RoccAcc) extends LazyRoCCModuleImp(outer) {
   }
 
   /***************
-   * DATA FETCH
+   * DATA FETCH FOR ALU
    * Most instructions pass pointers to vectors, so we need to fetch that before
    * operating on the data.
    **************/
@@ -87,8 +87,23 @@ class RoccAccImp(outer: RoccAcc) extends LazyRoCCModuleImp(outer) {
   data_fetcher.io.addr1 := roccCmd.rs1
   data_fetcher.io.addr2 := roccCmd.rs2
 
+    /***************
+   * DATA FETCH FOR ENCODER/DECODER
+   **************/
+  val rs_data_fetcher = Module(new BlockFetcher)
+
+   // Connect the block fetcher to the memory interface
+  rs_data_fetcher.io.req <> io.mem.req
+  rs_data_fetcher.io.resp <> io.mem.resp
+
+   // Control signals
+  rs_data_fetcher.io.start := cmdValid && ctrl_sigs.legal
+  rs_data_fetcher.io.addr1 := roccCmd.rs1
+  rs_data_fetcher.io.addr2 := roccCmd.rs2
+
+
   /***************
-   * EXECUTE
+   * EXECUTE ALU
    **************/
   val alu = Module(new roccacc.ALU)
   val alu_out = Wire(UInt())
@@ -99,6 +114,18 @@ class RoccAccImp(outer: RoccAcc) extends LazyRoCCModuleImp(outer) {
   alu.io.in1 := Mux(data_fetcher.io.data1_valid, data_fetcher.io.data1, 0.U)
   alu.io.in2 := Mux(data_fetcher.io.data2_valid, data_fetcher.io.data2, 0.U)
   alu_out := alu.io.out
+
+  /***************
+   * EXECUTE ALU
+   **************/
+  // RS encode/decode datapath unit (see RSUnit.scala for the interface contract).
+  // TODO: drive `in` from the fetched words (unpacked into symbols), `start`
+  // from fetch-complete, and consume `out`/`done` in the RESPOND stage.
+  // `ctrl_sigs.unit` (UNIT_RS_ENC / UNIT_RS_DEC) selects `op`.
+  val rs_unit = Module(new RSUnit)
+  rs_unit.io.op    := RSUnit.OP_ENCODE
+  rs_unit.io.start := false.B
+  rs_unit.io.in.foreach(_ := 0.U)
 
   /***************
    * RESPOND

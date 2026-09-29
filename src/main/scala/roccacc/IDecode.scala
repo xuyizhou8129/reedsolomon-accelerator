@@ -7,6 +7,17 @@ import freechips.rocketchip.tile.HasCoreParameters
 import Instructions._
 import roccacc.constants._
 import ALU._
+import ExecUnit._
+
+/** Which execution unit an instruction targets. Produced by the decode table
+  * and consumed by RoccAccImp to steer the fetched operands. */
+object ExecUnit {
+  val SZ_UNIT = 2.W
+  def UNIT_X      = BitPat("b??")
+  def UNIT_ALU    = BitPat("b00")
+  def UNIT_RS_ENC = BitPat("b01")
+  def UNIT_RS_DEC = BitPat("b10")
+}
 
 /** Trait holding an abstract (non-instantiated) mapping between the instruction
   * bit pattern and its control signals.
@@ -20,15 +31,17 @@ trait DecodeConstants extends HasCoreParameters { // TODO: Not sure if extends n
 /** Control signals in the processor.
   * These are set during decoding.
   */
-class CtrlSigs extends Bundle { // TODO: Rename to BinOpCtrlSigs?
+class CtrlSigs extends Bundle {
   /* All control signals used in this coprocessor
    * See rocket-chip's rocket/IDecode.scala#IntCtrlSigs#default */
   val legal = Bool() // Example control signal.
   val alu_fn = Bits(SZ_ALU_FN)
+  val unit = Bits(SZ_UNIT) // Which execution unit handles this instruction
   /** List of default control signal values
     * @return List of default control signal values. */
+    //Anything that doesnt match the decode table will fall back to List(N, FN_X)
   def default_decode_ctrl_sigs: List[BitPat] =
-    List(N, FN_X)
+    List(N, FN_X, UNIT_X)
 
   /** Decodes an instruction to its control signals.
     * @param inst The instruction bit pattern to be decoded.
@@ -37,10 +50,12 @@ class CtrlSigs extends Bundle { // TODO: Rename to BinOpCtrlSigs?
     * @return Sequence of control signal values for the provided instruction.
     */
   def decode(inst: UInt, decode_table: Iterable[(BitPat, List[BitPat])]) = {
+    //Currently the decoder is a generated hardware with 1-bit wire for legal and a 4-bit wire for alu_fn
+    //inst is the funct field of the instruction, which is 7 bits wide.
     val decoder = freechips.rocketchip.rocket.DecodeLogic(inst, default_decode_ctrl_sigs, decode_table)
     /* Make sequence ordered how signals are ordered.
      * See rocket-chip's rocket/IDecode.scala#IntCtrlSigs#decode#sigs */
-    val ctrl_sigs = Seq(legal, alu_fn)
+    val ctrl_sigs = Seq(legal, alu_fn, unit)
     /* Decoder is a minimized truth-table. We partially apply the map here,
      * which allows us to apply an instruction to get its control signals back.
      * We then zip that with the sequence of names for the control signals. */
@@ -56,5 +71,8 @@ class CtrlSigs extends Bundle { // TODO: Rename to BinOpCtrlSigs?
   */
 class BinOpDecode(implicit val p: Parameters) extends DecodeConstants {
   val decode_table: Array[(BitPat, List[BitPat])] = Array(
-    PLUS_INT-> List(Y, FN_ADD))
+    PLUS_INT  -> List(Y, FN_ADD, UNIT_ALU),
+    RS_ENCODE -> List(Y, FN_X,   UNIT_RS_ENC),
+    RS_DECODE -> List(Y, FN_X,   UNIT_RS_DEC)
+  )
 }

@@ -155,7 +155,7 @@ class BlockFetcher(maxWords: Int)(implicit p: Parameters) extends CoreModule()(p
 
     // Each outstanding word is identified by its index in the tag field,
   // so the tag must be wide enough to hold maxWords - 1.
-  require(maxWords <= (1 << dcacheReqTagBits), "maxWords exceeds cache tag space")
+  require(maxWords <= (1 << coreParams.dcacheReqTagBits), "maxWords exceeds cache tag space")
 
   val bytesPerWord = xLen / 8
 
