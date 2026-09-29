@@ -193,8 +193,9 @@ class BlockFetcher(maxWords: Int)(implicit p: Parameters) extends CoreModule()(p
   io.req.bits.mask     := 0.U
   io.req.bits.tag      := 0.U
 
-  io.data := data_regs
-  io.done := done_reg
+  io.data  := data_regs
+  io.valid := received.asBools
+  io.done  := done_reg
 
   switch(state) {
     is(State.idle) {
@@ -243,6 +244,114 @@ class BlockFetcher(maxWords: Int)(implicit p: Parameters) extends CoreModule()(p
   }
 }
 
+
+
+//Encoder and Decoder results go back to memory in blocks.
+//Store-side counterpart of BlockFetcher.
+class BlockWriter(maxWords: Int)(implicit p: Parameters) extends CoreModule()(p) with MemoryOpConstants {
+  val bytesPerWord = xLen / 8
+
+  val io = IO(new Bundle {
+    val start = Input(Bool()) //one cycle pulse to start writing
+    val base  = Input(UInt(xLen.W)) //base address of the first word, must be xLen/8 aligned
+    val bytes = Input(UInt(log2Ceil(maxWords * bytesPerWord + 1).W)) //number of bytes to write
+    val data  = Input(Vec(maxWords, UInt(xLen.W))) //data to write, latched on start
+    val busy  = Output(Bool())
+    val done  = Output(Bool()) //every store has been acknowledged by the cache, held until next start
+    val req   = Decoupled(new HellaCacheReq)
+    val resp  = Flipped(Valid(new HellaCacheResp))
+  })
+
+  // The tag holds the word index, as in BlockFetcher.
+  require(maxWords <= (1 << coreParams.dcacheReqTagBits), "maxWords exceeds cache tag space")
+
+  object State extends ChiselEnum { val idle, writing = Value }
+  val state = RegInit(State.idle)
+
+  // Latched command
+  val latched_base  = Reg(UInt(xLen.W))
+  val latched_data  = Reg(Vec(maxWords, UInt(xLen.W)))
+  val latched_words = Reg(UInt(log2Ceil(maxWords + 1).W))
+  // Byte enables of the last word. All ones when bytes is a multiple of the word size.
+  val last_mask     = Reg(UInt(bytesPerWord.W))
+
+  // Progress tracking
+  val issued   = RegInit(0.U(log2Ceil(maxWords + 1).W))  // how many stores sent
+  val acked    = RegInit(0.U(maxWords.W))                // bitmask of stores acknowledged
+  val done_reg = RegInit(false.B)
+
+  val expected = ((1.U << latched_words) - 1.U)(maxWords - 1, 0)
+
+  // Default request values
+  io.req.valid         := false.B
+  io.req.bits          := DontCare
+  io.req.bits.addr     := 0.U
+  io.req.bits.cmd      := M_XWR
+  io.req.bits.size     := log2Ceil(bytesPerWord).U   // full xLen store
+  io.req.bits.signed   := false.B
+  io.req.bits.dprv     := 0.U
+  io.req.bits.dv       := false.B
+  io.req.bits.phys     := false.B
+  io.req.bits.no_resp  := false.B
+  io.req.bits.no_alloc := false.B
+  io.req.bits.no_xcpt  := false.B
+  io.req.bits.data     := 0.U
+  io.req.bits.mask     := Fill(bytesPerWord, 1.U(1.W))
+  io.req.bits.tag      := 0.U
+
+  io.busy := state =/= State.idle
+  io.done := done_reg
+
+  switch(state) {
+    is(State.idle) {
+      when(io.start) {
+        val words = (io.bytes +& (bytesPerWord - 1).U) >> log2Ceil(bytesPerWord)
+        val tail  = io.bytes(log2Ceil(bytesPerWord) - 1, 0)
+        latched_base  := io.base
+        latched_data  := io.data
+        latched_words := words
+        // tail == 0 means the last word is full
+        last_mask     := Mux(tail === 0.U, Fill(bytesPerWord, 1.U(1.W)), (1.U << tail) - 1.U)
+        issued        := 0.U
+        acked         := 0.U
+        done_reg      := false.B
+        state         := State.writing
+      }
+    }
+
+    is(State.writing) {
+      // ISSUE: one store per cycle while the cache accepts them.
+      when(issued < latched_words) {
+        val is_last = issued === latched_words - 1.U
+        io.req.valid     := true.B
+        io.req.bits.addr := latched_base + (issued * bytesPerWord.U)
+        io.req.bits.data := latched_data(issued)
+        io.req.bits.tag  := issued
+        // A partial last word uses a masked store so bytes past the buffer are untouched.
+        when(is_last && !last_mask.andR) {
+          io.req.bits.cmd  := M_PWR
+          io.req.bits.mask := last_mask
+        }
+      }
+      when(io.req.fire) {
+        issued := issued + 1.U
+      }
+
+      // COLLECT: the cache acknowledges each store with a response that has
+      // no data. Waiting for every ack means the results are visible to the
+      // core before we tell it we are done.
+      when(io.resp.valid && !io.resp.bits.has_data) {
+        val idx = io.resp.bits.tag(log2Ceil(maxWords) - 1, 0)
+        acked := acked | UIntToOH(idx, maxWords)
+      }
+
+      when(issued === latched_words && acked === expected) {
+        done_reg := true.B
+        state    := State.idle
+      }
+    }
+  }
+}
 
 
 /** Module connecting VCode accelerator directly to the L1-L2 crossbar connecting
