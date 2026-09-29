@@ -98,8 +98,8 @@ class RoccAccImp(outer: RoccAcc) extends LazyRoCCModuleImp(outer) {
 
    // Control signals
   rs_data_fetcher.io.start := cmdValid && ctrl_sigs.legal
-  rs_data_fetcher.io.addr1 := roccCmd.rs1
-  rs_data_fetcher.io.addr2 := roccCmd.rs2
+  rs_data_fetcher.io.base := roccCmd.rs1
+  rs_data_fetcher.io.words := roccCmd.rs2
 
 
   /***************
