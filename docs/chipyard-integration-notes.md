@@ -45,4 +45,4 @@ cd sims/verilator
 make CONFIG=RoccAccConfig
 
 5.Running Code: 
-./simulator-chipyard.harness-RoccAccConfig /pool/xuyi/Project1_C/chipyardfork/accelerator/generators/rocc-acc/test/bin/rocc_add.riscv
+./simulator-chipyard.harness-RoccAccConfig /pool/xuyi/Project1_C/chipyardfork/accelerator/generators/rocc-acc/test/bin/rocc_rs.riscv

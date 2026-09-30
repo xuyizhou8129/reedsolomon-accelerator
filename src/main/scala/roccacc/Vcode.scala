@@ -74,9 +74,8 @@ class RoccAccImp(outer: RoccAcc)(implicit p: Parameters) extends LazyRoCCModuleI
     }
   }
 
-  // Which unit the current command targets. roccCmd is a register, so these
-  // hold for the whole command.
-  val is_alu = ExecUnit.UNIT_ALU === ctrl_sigs.unit
+  // Whether the current command targets the RS unit. roccCmd is a register,
+  // so this holds for the whole command.
   val is_rs  = ExecUnit.UNIT_RS_ENC === ctrl_sigs.unit || ExecUnit.UNIT_RS_DEC === ctrl_sigs.unit
 
   // Remember when we need to respond (since cmd.valid is only high for one cycle)
@@ -88,21 +87,6 @@ class RoccAccImp(outer: RoccAcc)(implicit p: Parameters) extends LazyRoCCModuleI
   when(cmd_start) {
     cmdValid := false.B
   }
-
-  /***************
-   * DATA FETCH FOR ALU
-   * Most instructions pass pointers to vectors, so we need to fetch that before
-   * operating on the data.
-   **************/
-  val data_fetcher = Module(new DCacheFetcher)
-  
-  // Memory interface is shared, see MEMORY PORT below
-  data_fetcher.io.resp := io.mem.resp
-  
-  // Control signals
-  data_fetcher.io.start := cmd_start && is_alu
-  data_fetcher.io.addr1 := roccCmd.rs1
-  data_fetcher.io.addr2 := roccCmd.rs2
 
   /***************
    * DATA FETCH FOR ENCODER/DECODER
@@ -132,19 +116,6 @@ class RoccAccImp(outer: RoccAcc)(implicit p: Parameters) extends LazyRoCCModuleI
   rs_data_writer.io.resp  := io.mem.resp
 
   /***************
-   * EXECUTE ALU
-   **************/
-  val alu = Module(new roccacc.ALU)
-  val alu_out = Wire(UInt())
-  // Hook up the ALU to RoccAcc signals
-  alu.io.dw := 1.U(1.W)  // Use 64-bit operations for now
-  alu.io.fn := Mux(data_fetcher.io.data1_valid && data_fetcher.io.data2_valid, ctrl_sigs.alu_fn, 1.U)
-  // Use fetched data, otherwise the inputs are 0
-  alu.io.in1 := Mux(data_fetcher.io.data1_valid, data_fetcher.io.data1, 0.U)
-  alu.io.in2 := Mux(data_fetcher.io.data2_valid, data_fetcher.io.data2, 0.U)
-  alu_out := alu.io.out
-
-  /***************
    * EXECUTE RS_Unit
    * fetch rs1 -> RSUnit -> write rs2 -> respond
    **************/
@@ -165,6 +136,7 @@ class RoccAccImp(outer: RoccAcc)(implicit p: Parameters) extends LazyRoCCModuleI
   val rs_fetched_syms = rs_data_fetcher.io.data.flatMap { w =>
     (0 until rs_symsPerWord).map(i => w(8 * rs_symBytes * (i + 1) - 1, 8 * rs_symBytes * i))
   }
+  //one bit signal determining whether the current command is a decode or encode operation
   val rs_is_decode = ExecUnit.UNIT_RS_DEC === ctrl_sigs.unit
   for (j <- 0 until rs_n) {
     // Encode only uses the first k symbols. Zero the rest so the bytes past
@@ -228,15 +200,15 @@ class RoccAccImp(outer: RoccAcc)(implicit p: Parameters) extends LazyRoCCModuleI
    * Only one requester is active at a time, so steer by which one is running.
    * Responses are broadcast and each unit only listens while it is active.
    **************/
-  io.mem.req <> data_fetcher.io.req
+  // Default: no request
+  io.mem.req.valid := false.B
+  io.mem.req.bits  := DontCare
   rs_data_fetcher.io.req.ready := false.B
   rs_data_writer.io.req.ready  := false.B
   when(rs_state === RSState.sFetch) {
     io.mem.req <> rs_data_fetcher.io.req
-    data_fetcher.io.req.ready := false.B
   } .elsewhen(rs_state === RSState.sWrite) {
     io.mem.req <> rs_data_writer.io.req
-    data_fetcher.io.req.ready := false.B
   }
 
   /***************
@@ -255,12 +227,6 @@ class RoccAccImp(outer: RoccAcc)(implicit p: Parameters) extends LazyRoCCModuleI
   io.resp.bits := response
   io.resp.valid := response_valid
   
-  // Prepare response data when computation is complete
-  when(is_alu && alu.io.valid && response_needed) { 
-    response.data := alu_out
-    response.rd := roccInst.rd
-    response_fed := true.B
-  }
   // RS results are already in memory, rd only carries the status
   when(is_rs && rs_state === RSState.sDone && response_needed && !response_fed) {
     response.data := rs_status
@@ -288,7 +254,7 @@ class RoccAccImp(outer: RoccAcc)(implicit p: Parameters) extends LazyRoCCModuleI
   // An illegal command keeps cmdValid high to hold the interrupt, but must
   // not block the next command, so only legal ones count.
   accel_busy := cmd_start || response_needed || response_valid ||
-                rs_state =/= RSState.sIdle || data_fetcher.io.busy
+                rs_state =/= RSState.sIdle
   io.busy := accel_busy
   }
 
